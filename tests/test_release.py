@@ -39,7 +39,7 @@ def test_publish_ok_without_register():
     assert publish_ok(True, False) is True
 
 
-def test_post_releases_records_failed_keeps_previous():
+def test_post_releases_creates_pending_ignores_client_booleans():
     seed_user("admin_rel", "admin-pass", "admin", must_change_password=False)
     db = next(get_test_session())
     try:
@@ -71,13 +71,14 @@ def test_post_releases_records_failed_keeps_previous():
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "failed"
+    assert body["status"] == "pending"
     assert body["plan"][0] == "sofia profile external killgw gw1"
+    assert "id" in body
 
     db = next(get_test_session())
     try:
         releases = list(db.scalars(select(ConfigRelease).order_by(ConfigRelease.id)).all())
-        assert [r.status for r in releases] == ["applied", "failed"]
+        assert [r.status for r in releases] == ["applied", "pending"]
         audits = list(db.scalars(select(AuditLog)).all())
         assert len(audits) == 1
         assert audits[0].actor == "admin_rel"
@@ -88,7 +89,7 @@ def test_post_releases_records_failed_keeps_previous():
         db.close()
 
 
-def test_post_releases_applied_on_success():
+def test_post_releases_alone_stays_pending_not_applied():
     seed_user("admin_ok", "admin-pass", "admin", must_change_password=False)
     client = TestClient(app)
     login = client.post("/auth/login", json={"username": "admin_ok", "password": "admin-pass"})
@@ -106,8 +107,98 @@ def test_post_releases_applied_on_success():
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "applied"
+    assert resp.json()["status"] == "pending"
     assert resp.json()["plan"] == ["reloadacl"]
+
+
+def test_engine_apply_pending_release_success_marks_applied():
+    from vr_engine.main import EngineCtx, apply_pending_release
+
+    seed_user("admin_apply", "admin-pass", "admin", must_change_password=False)
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin_apply", "password": "admin-pass"})
+    token = login.json()["access_token"]
+    resp = client.post(
+        "/releases",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "kind": "acl",
+            "name": "default",
+            "snapshot": {"acl": ["1.2.3.4"]},
+            "needs_register": False,
+        },
+    )
+    release_id = resp.json()["id"]
+    sent: list[str] = []
+
+    class _Transport:
+        def sendall(self, data: bytes) -> None:
+            sent.append(data.decode("utf-8"))
+
+    ctx = EngineCtx(entries={}, numbers={}, transport=_Transport())
+    db = next(get_test_session())
+    try:
+        status = apply_pending_release(
+            ctx, release_id, db=db, command_ok=True, reged=False
+        )
+        assert status == "applied"
+        row = db.get(ConfigRelease, release_id)
+        assert row is not None
+        assert row.status == "applied"
+        assert row.applied_at is not None
+        assert any("reloadacl" in line for line in sent)
+    finally:
+        db.close()
+
+
+def test_engine_apply_pending_release_failed_keeps_previous_applied():
+    from vr_engine.main import EngineCtx, apply_pending_release
+
+    seed_user("admin_fail", "admin-pass", "admin", must_change_password=False)
+    db = next(get_test_session())
+    try:
+        db.add(
+            ConfigRelease(
+                tenant_id=DEFAULT_TENANT,
+                snapshot_json=json.dumps({"gateways": [{"name": "gw-old"}]}),
+                status="applied",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin_fail", "password": "admin-pass"})
+    token = login.json()["access_token"]
+    resp = client.post(
+        "/releases",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "kind": "gateway_update",
+            "name": "gw1",
+            "snapshot": {"gateways": [{"name": "gw-new"}]},
+            "needs_register": True,
+        },
+    )
+    release_id = resp.json()["id"]
+
+    class _Transport:
+        def sendall(self, data: bytes) -> None:
+            pass
+
+    ctx = EngineCtx(entries={}, numbers={}, transport=_Transport())
+    db = next(get_test_session())
+    try:
+        status = apply_pending_release(
+            ctx, release_id, db=db, command_ok=True, reged=False
+        )
+        assert status == "failed"
+        releases = list(db.scalars(select(ConfigRelease).order_by(ConfigRelease.id)).all())
+        assert [r.status for r in releases] == ["applied", "failed"]
+        assert json.loads(releases[0].snapshot_json)["gateways"][0]["name"] == "gw-old"
+    finally:
+        db.close()
 
 
 def test_recording_returns_media_token_and_audits():

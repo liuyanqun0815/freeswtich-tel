@@ -6,7 +6,11 @@ import os
 import socket
 from typing import Any
 
-from vr_engine.main import EngineCtx, handle_event
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from vr_common.db import get_database_url
+from vr_engine.main import EngineCtx, handle_event, load_engine_ctx
 
 # Design §4 / §7 event names the engine must see (plain + CUSTOM subclass).
 ESL_EVENT_NAMES = (
@@ -18,6 +22,23 @@ ESL_EVENT_NAMES = (
     "PLAYBACK_START",
     "CUSTOM mod_audio_stream::play",
 )
+
+_SessionLocal: sessionmaker[Session] | None = None
+
+
+def _sync_database_url() -> str:
+    url = get_database_url()
+    if url.startswith("postgresql+asyncpg"):
+        return url.replace("postgresql+asyncpg", "postgresql+psycopg2", 1)
+    return url
+
+
+def _session_factory() -> sessionmaker[Session]:
+    global _SessionLocal
+    if _SessionLocal is None:
+        engine = create_engine(_sync_database_url(), pool_pre_ping=True)
+        _SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    return _SessionLocal
 
 
 def connect(host: str, port: int | str, password: str) -> socket.socket:
@@ -82,7 +103,8 @@ def main() -> None:
     port = os.environ.get("FS_ESL_PORT", "8021")
     password = os.environ.get("FS_ESL_PASSWORD", "ClueCon")
     sock = connect(host, port, password)
-    ctx = EngineCtx(entries={}, numbers={})
+    db = _session_factory()()
+    ctx = load_engine_ctx(db)
     ctx.transport = sock
     read_loop(ctx)
 

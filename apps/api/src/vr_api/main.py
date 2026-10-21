@@ -18,13 +18,14 @@ from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
 from vr_common.db import DEFAULT_TENANT
 from vr_common.ivr import publish as ivr_publish, validate as ivr_validate
 from vr_common.models import AuditLog, CallRecord, ConfigRelease, IvrFlow, IvrPublish, User
-from vr_common.release import plan_apply, publish_ok
+from vr_common.release import plan_apply
 
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
 app.include_router(resources_router)
 
 _RELEASE_KINDS = frozenset({"gateway_update", "gateway_create", "acl"})
+_RELEASE_META_KEY = "__release_meta__"
 
 
 class IvrPublishOut(BaseModel):
@@ -37,11 +38,13 @@ class ReleaseRequest(BaseModel):
     name: str
     snapshot: dict[str, Any]
     needs_register: bool = True
+    # Kept for backward compat; ignored for status (engine applies via ESL).
     reged: bool = False
     command_ok: bool = True
 
 
 class ReleaseOut(BaseModel):
+    id: int
     status: str
     plan: list[str]
 
@@ -95,8 +98,8 @@ def create_release(
             detail="only gateway and ACL releases are supported",
         )
     plan = plan_apply(body.kind, body.name)
-    ok = body.command_ok and publish_ok(body.reged, body.needs_register)
-    release_status = "applied" if ok else "failed"
+    # Status is pending until the engine runs ESL + REGED (never from client booleans).
+    release_status = "pending"
 
     previous = db.scalars(
         select(ConfigRelease)
@@ -114,11 +117,17 @@ def create_release(
         except json.JSONDecodeError:
             before = None
 
+    snapshot_payload = dict(body.snapshot)
+    snapshot_payload[_RELEASE_META_KEY] = {
+        "kind": body.kind,
+        "name": body.name,
+        "needs_register": body.needs_register,
+    }
     row = ConfigRelease(
         tenant_id=DEFAULT_TENANT,
-        snapshot_json=json.dumps(body.snapshot, ensure_ascii=False),
+        snapshot_json=json.dumps(snapshot_payload, ensure_ascii=False),
         status=release_status,
-        applied_at=datetime.now(timezone.utc) if ok else None,
+        applied_at=None,
     )
     db.add(row)
     db.add(
@@ -131,7 +140,8 @@ def create_release(
         )
     )
     db.commit()
-    return ReleaseOut(status=release_status, plan=plan)
+    db.refresh(row)
+    return ReleaseOut(id=row.id, status=release_status, plan=plan)
 
 
 @app.get("/cdr")
