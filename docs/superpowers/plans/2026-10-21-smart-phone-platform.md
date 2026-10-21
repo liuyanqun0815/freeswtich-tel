@@ -14,7 +14,7 @@
 
 - 只有 `engine` 连接 ESL 并下发通道命令。`ai_gw`、机器人、管理台都不连 ESL。
 - `config` 只按库中配置生成 XML，不做路由策略。
-- `api` 写配置草稿；生效必须走发布，由 `engine` 对 FS 执行 `sofia rescan`、`killgw`、`xml_flush_cache` 等。
+- 路由与分机：`api` 保存即写入库，xml_curl 下一通/下一次注册读到新值；若 directory 开了 cacheable，保存后 `engine` 自动 `xml_flush_cache`。网关与 ACL：保存为草稿；一键「发布」才由 `engine` 执行 `sofia rescan` / `killgw` / `reloadacl`，并验收 REGED；失败不标已发布，上一成功快照仍生效。`config` 对 sofia 只返回已发布网关。
 - 全链路使用 `vr_call_id`。
 - 业务表带 `tenant_id`，本期只存在默认租户 `t001`，界面不提供切换。
 - 话单「通话时长」是客户腿 `billsec`；「持续时长」是 `duration`。详情另展示坐席时长、排队时长、机器人时长。
@@ -282,7 +282,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: Write minimal implementation**
 
-XML 文本用 `xml.sax.saxutils.escape` 转义动态字段。`directory_xml` 使用 a1-hash，不出现明文密码。`POST /fs/xml` 读取 form 字段 `section`、`user`、`domain`、`key_value`、`hostname`。`section=dialplan` 时只返回统一 park extension，不按被叫号码分支。`key_value=sofia.conf` 时返回已发布快照里的网关；没有已发布快照时返回空 gateways。`deploy/freeswitch/xml_curl.conf.xml` 的 `gateway-url` 为 `http://127.0.0.1:8081/fs/xml`，`bindings="directory|dialplan|configuration"`，`timeout` 为 5，`auth-scheme` 为 basic。
+XML 文本用 `xml.sax.saxutils.escape` 转义动态字段。`directory_xml` 使用 a1-hash，不出现明文密码。`POST /fs/xml` 读取 form 字段 `section`、`user`、`domain`、`key_value`、`hostname`。`section=dialplan` 时只返回统一 park extension，不按被叫号码分支。`key_value=sofia.conf` 时**只**返回已发布快照里的网关（草稿不出现）；没有已发布快照时返回空 gateways。`section=directory` 与 `section=dialplan` 读库中当前保存值，不要求发布。`deploy/freeswitch/xml_curl.conf.xml` 的 `gateway-url` 为 `http://127.0.0.1:8081/fs/xml`，`bindings="directory|dialplan|configuration"`，`timeout` 为 5，`auth-scheme` 为 basic。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -925,11 +925,12 @@ git commit -m "feat: block outbound calls that fail compliance checks"
 **Interfaces:**
 - Consumes: `ConfigRelease.snapshot_json`、`AuditLog`
 - Produces:
-  - `plan_apply(kind: str, name: str) -> list[str]` 网关修改返回 `["sofia profile external killgw {name}", "sofia profile external rescan"]`；新增网关只有 rescan；分机变更返回 `["xml_flush_cache {name}"]`
-  - `rollback(history: list[dict]) -> dict` 返回最近一条 `status=="applied"` 的快照
+  - `plan_apply(kind: str, name: str) -> list[str]` 仅用于网关与 ACL：网关修改返回 `["sofia profile external killgw {name}", "sofia profile external rescan"]`；新增网关只有 rescan；ACL 返回 `["reloadacl"]`。分机不走发布；`on_extension_saved(ext: str, cacheable: bool) -> list[str]` 仅在 `cacheable` 为 True 时返回 `["xml_flush_cache {ext}"]`
+  - `publish_ok(reged: bool, needs_register: bool) -> bool`：需要注册的网关必须 `reged`；不需要注册的网关只要命令成功
+  - `rollback(history: list[dict]) -> dict` 返回最近一条 `status=="applied"` 的网关/ACL 快照
   - `reconcile(redis_ids: set[str], fs_ids: set[str]) -> dict` 键 `missing_on_fs`、`missing_in_redis`
-  - `POST /releases` 写 `AuditLog`，字段 `actor`、`action`、`before`、`after`
-  - 任一步命令失败时新行 `status=="failed"`，当前生效版本仍是回滚选中的上一版
+  - `POST /releases` 仅发布网关与 ACL；写 `AuditLog`，字段 `actor`、`action`、`before`、`after`
+  - 任一步命令失败或 REGED 验收失败时新行 `status=="failed"`，不标已发布；当前生效仍是上一成功快照
 
 - [ ] **Step 1: Write the failing test**
 
@@ -938,7 +939,12 @@ from vr_common.release import plan_apply, rollback
 from vr_common.reconcile import reconcile
 
 def test_failed_release_keeps_previous_applied_snapshot():
+    from vr_common.release import on_extension_saved, publish_ok
     assert plan_apply("gateway_update", "gw1")[0] == "sofia profile external killgw gw1"
+    assert on_extension_saved("8001", True) == ["xml_flush_cache 8001"]
+    assert on_extension_saved("8001", False) == []
+    assert publish_ok(True, True) is True
+    assert publish_ok(False, True) is False
     history = [
         {"id": 1, "status": "applied", "snapshot": {"gw": "old"}},
         {"id": 2, "status": "failed", "snapshot": {"gw": "new"}},
@@ -954,7 +960,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Write minimal implementation**
 
-`missing_on_fs` 的通话要生成一条 `hangup_cause="RECONCILE"` 的话单事件，并调用 `session.delete`。`missing_in_redis` 且事件带 `vr_call_id` 时生成 `uuid_kill`。录音播放 `GET /cdr/{call_id}/recording` 返回短期 token 路径 `/media/{token}`，并插入 `AuditLog.action=="play_recording"`。无 `record_url` 时返回 404。
+发布对象仅网关与 ACL。分机保存走 `on_extension_saved`，不创建 `ConfigRelease`。`missing_on_fs` 的通话要生成一条 `hangup_cause="RECONCILE"` 的话单事件，并调用 `session.delete`。`missing_in_redis` 且事件带 `vr_call_id` 时生成 `uuid_kill`。录音播放 `GET /cdr/{call_id}/recording` 返回短期 token 路径 `/media/{token}`，并插入 `AuditLog.action=="play_recording"`。无 `record_url` 时返回 404。
 
 - [ ] **Step 4: Run test to verify it passes**
 
