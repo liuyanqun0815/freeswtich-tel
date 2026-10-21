@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from vr_common.db import DEFAULT_TENANT, get_database_url
-from vr_common.models import ConfigRelease, Extension, User
+from vr_common.models import ConfigRelease, Entry, Extension, PhoneNumber, User
 from vr_common import xmlbuild
 
 app = FastAPI(title="vr-config")
@@ -93,6 +93,53 @@ def _agent_id_for_extension(db: Session, extension_id: int) -> str:
     return str(user.id) if user else ""
 
 
+def _destination_number(form: Any) -> str | None:
+    for key in ("destination_number", "Caller-Destination-Number"):
+        raw = form.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return None
+
+
+def _lookup_entry_for_number(
+    db: Session, tenant_id: str, number: str
+) -> tuple[PhoneNumber | None, Entry | None]:
+    phone_stmt = (
+        select(PhoneNumber)
+        .where(
+            PhoneNumber.tenant_id == tenant_id,
+            PhoneNumber.number == number,
+            PhoneNumber.enabled.is_(True),
+        )
+        .limit(1)
+    )
+    phone = db.scalars(phone_stmt).first()
+    if phone is None:
+        return None, None
+    entry_stmt = (
+        select(Entry)
+        .where(
+            Entry.tenant_id == tenant_id,
+            Entry.code == number,
+            Entry.enabled.is_(True),
+        )
+        .limit(1)
+    )
+    entry = db.scalars(entry_stmt).first()
+    return phone, entry
+
+
+def _vr_entry_for_dialplan(db: Session, tenant_id: str, destination: str | None) -> str:
+    if not destination:
+        return "did:unknown"
+    phone, entry = _lookup_entry_for_number(db, tenant_id, destination)
+    if phone is None:
+        return "did:unknown"
+    if entry is not None:
+        return f"{entry.kind}:{entry.target}"
+    return f"did:{phone.number}"
+
+
 def _published_gateways(db: Session, tenant_id: str) -> list[dict[str, Any]]:
     stmt = (
         select(ConfigRelease)
@@ -146,7 +193,8 @@ async def fs_xml(
         return _xml_response(xmlbuild.directory_xml(domain, user, a1, agent_id))
 
     if section == "dialplan":
-        entry = "did:${destination_number}"
+        destination = _destination_number(form)
+        entry = _vr_entry_for_dialplan(db, tenant_id, destination)
         body = xmlbuild.park_dialplan(tenant_id, entry, _park_timeout_seconds())
         return _xml_response(body)
 

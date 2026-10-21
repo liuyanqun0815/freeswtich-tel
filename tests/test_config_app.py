@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import vr_config.main as config_main
-from vr_common.models import Base, ConfigRelease, Extension, Gateway, User
+from vr_common.models import Base, ConfigRelease, Entry, Extension, Gateway, PhoneNumber, User
 from vr_config.main import app, get_db
 
 
@@ -90,7 +90,7 @@ def test_directory_enabled_extension_uses_saved_db_values(client):
     assert f'variable name="agent_id" value="{user.id}"' in response.text
 
 
-def test_dialplan_returns_unified_park_extension(client):
+def test_dialplan_returns_unified_park_with_unknown_entry_without_db_match(client):
     response = client.post(
         "/fs/xml",
         data={
@@ -103,8 +103,38 @@ def test_dialplan_returns_unified_park_extension(client):
     assert response.status_code == 200
     assert "vr_call_id=${uuid}" in response.text
     assert "vr_tenant=t001" in response.text
-    assert "vr_entry=did:${destination_number}" in response.text
+    assert "vr_entry=did:unknown" in response.text
     assert "park_timeout=20" in response.text
+    assert '<action application="park"/>' in response.text
+
+
+def test_dialplan_entry_from_seeded_phone_number_and_entry(client):
+    client.db.add(
+        PhoneNumber(tenant_id="t001", number="4008001234", enabled=True)
+    )
+    client.db.add(
+        Entry(
+            tenant_id="t001",
+            code="4008001234",
+            kind="robot",
+            target="scene-1",
+            enabled=True,
+        )
+    )
+    client.db.commit()
+
+    response = client.post(
+        "/fs/xml",
+        data={
+            "section": "dialplan",
+            "hostname": "fs1",
+            "Caller-Destination-Number": "4008001234",
+        },
+        auth=("fs", "secret"),
+    )
+    assert response.status_code == 200
+    assert "vr_entry=robot:scene-1" in response.text
+    assert "vr_tenant=t001" in response.text
     assert '<action application="park"/>' in response.text
 
 
