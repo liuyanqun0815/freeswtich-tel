@@ -13,25 +13,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vr_api.auth import get_db, require_admin, require_password_changed, router as auth_router
+from vr_api.resources import router as resources_router
 from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
 from vr_common.db import DEFAULT_TENANT
 from vr_common.ivr import publish as ivr_publish, validate as ivr_validate
-from vr_common.models import AuditLog, CallRecord, ConfigRelease, Gateway, IvrFlow, IvrPublish, User
+from vr_common.models import AuditLog, CallRecord, ConfigRelease, IvrFlow, IvrPublish, User
 from vr_common.release import plan_apply, publish_ok
 
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
+app.include_router(resources_router)
 
 _RELEASE_KINDS = frozenset({"gateway_update", "gateway_create", "acl"})
-
-
-class GatewayCreate(BaseModel):
-    name: str
-
-
-class GatewayOut(BaseModel):
-    id: int
-    name: str
 
 
 class IvrPublishOut(BaseModel):
@@ -55,19 +48,6 @@ class ReleaseOut(BaseModel):
 
 class RecordingOut(BaseModel):
     path: str
-
-
-@app.post("/gateways", response_model=GatewayOut, status_code=status.HTTP_201_CREATED)
-def create_gateway(
-    body: GatewayCreate,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)],
-) -> GatewayOut:
-    gateway = Gateway(name=body.name)
-    db.add(gateway)
-    db.commit()
-    db.refresh(gateway)
-    return GatewayOut(id=gateway.id, name=gateway.name)
 
 
 @app.post("/ivr/{flow_id}/publish", response_model=IvrPublishOut)
