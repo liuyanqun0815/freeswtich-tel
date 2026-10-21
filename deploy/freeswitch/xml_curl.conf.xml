@@ -1,0 +1,9 @@
+<configuration name="xml_curl.conf" description="cURL Xml Gateway">
+  <bindings>
+    <binding name="vr-config">
+      <param name="gateway-url" value="http://127.0.0.1:8081/fs/xml" bindings="directory|dialplan|configuration"/>
+      <param name="timeout" value="5"/>
+      <param name="auth-scheme" value="basic"/>
+    </binding>
+  </bindings>
+</configuration>
