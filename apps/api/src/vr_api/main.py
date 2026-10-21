@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vr_api.auth import get_db, require_admin, require_password_changed, router as auth_router
 from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
 from vr_common.db import DEFAULT_TENANT
-from vr_common.models import CallRecord, Gateway, User
+from vr_common.ivr import publish as ivr_publish, validate as ivr_validate
+from vr_common.models import CallRecord, Gateway, IvrFlow, IvrPublish, User
 
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
@@ -27,6 +30,11 @@ class GatewayOut(BaseModel):
     name: str
 
 
+class IvrPublishOut(BaseModel):
+    flow_id: int
+    version: int
+
+
 @app.post("/gateways", response_model=GatewayOut, status_code=status.HTTP_201_CREATED)
 def create_gateway(
     body: GatewayCreate,
@@ -38,6 +46,39 @@ def create_gateway(
     db.commit()
     db.refresh(gateway)
     return GatewayOut(id=gateway.id, name=gateway.name)
+
+
+@app.post("/ivr/{flow_id}/publish", response_model=IvrPublishOut)
+def publish_ivr(
+    flow_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> IvrPublishOut:
+    flow = db.get(IvrFlow, flow_id)
+    if flow is None or flow.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IVR not found")
+    draft = json.loads(flow.draft_json or "{}")
+    errors = ivr_validate(draft)
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    previous = db.scalar(
+        select(func.max(IvrPublish.version)).where(
+            IvrPublish.flow_id == flow_id,
+            IvrPublish.tenant_id == DEFAULT_TENANT,
+        )
+    )
+    published = ivr_publish(draft, int(previous or 0))
+    row = IvrPublish(
+        flow_id=flow_id,
+        version=published["version"],
+        snapshot_json=json.dumps(published["snapshot"], ensure_ascii=False),
+        applied_at=datetime.now(timezone.utc),
+        tenant_id=DEFAULT_TENANT,
+    )
+    db.add(row)
+    db.commit()
+    return IvrPublishOut(flow_id=flow_id, version=published["version"])
 
 
 @app.get("/cdr")
