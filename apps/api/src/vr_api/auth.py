@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from vr_common import sipcred
 from vr_common.db import get_database_url
-from vr_common.models import User
+from vr_common.models import Extension, User
 from vr_common.security import (
     create_access_token,
     create_refresh_token,
@@ -54,6 +55,11 @@ class LoginResponse(BaseModel):
     access_token: str
     refresh_token: str
     must_change_password: bool
+    extension: str | None = None
+    sip_password: str | None = None
+    domain: str | None = None
+    wss_url: str | None = None
+    ice_servers: list[dict[str, str]] | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -111,6 +117,28 @@ def require_admin(user: Annotated[User, Depends(require_password_changed)]) -> U
     return user
 
 
+def _sip_fields_for_user(db: Session, user: User) -> dict[str, Any]:
+    if user.extension_id is None:
+        return {}
+    extension = db.get(Extension, user.extension_id)
+    if extension is None or not extension.enabled:
+        return {}
+    domain = sipcred.domain_for_tenant(user.tenant_id)
+    password = sipcred.issue_and_store(
+        sipcred.get_store(),
+        domain=domain,
+        ext=extension.ext_number,
+        agent_id=str(user.id),
+    )
+    return {
+        "extension": extension.ext_number,
+        "sip_password": password,
+        "domain": domain,
+        "wss_url": sipcred.wss_url(),
+        "ice_servers": sipcred.ice_servers(),
+    }
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> LoginResponse:
     user = db.scalar(select(User).where(User.username == body.username))
@@ -120,7 +148,24 @@ def login(body: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> LoginR
         access_token=create_access_token(user.id, user.role, user.tenant_id),
         refresh_token=create_refresh_token(user.id),
         must_change_password=user.must_change_password,
+        **_sip_fields_for_user(db, user),
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    if user.extension_id is not None:
+        extension = db.get(Extension, user.extension_id)
+        if extension is not None:
+            sipcred.delete_cred(
+                sipcred.get_store(),
+                sipcred.domain_for_tenant(user.tenant_id),
+                extension.ext_number,
+            )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/change-password", response_model=ChangePasswordResponse)

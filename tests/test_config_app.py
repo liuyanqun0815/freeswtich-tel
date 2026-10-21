@@ -64,30 +64,58 @@ def test_directory_unknown_user_returns_not_found(client):
     assert 'status="not found"' in response.text
 
 
-def test_directory_enabled_extension_uses_saved_db_values(client):
-    ext = Extension(tenant_id="t001", ext_number="8001", enabled=True)
-    user = User(
-        tenant_id="t001",
-        username="agent1",
-        password_hash="x",
-        role="agent",
-        must_change_password=False,
-        extension_id=1,
-    )
-    client.db.add(ext)
-    client.db.flush()
-    user.extension_id = ext.id
-    client.db.add(user)
-    client.db.commit()
+def test_directory_enabled_extension_requires_sipcred(client):
+    from vr_common import sipcred
+    from vr_common.sipcred import MemoryCredStore
+    from vr_common.xmlbuild import a1_hash
 
-    expected_a1 = hashlib.md5(b"8001:t001.vr.local:sip-pw").hexdigest()
-    response = client.post(
-        "/fs/xml",
-        data={"section": "directory", "user": "8001", "domain": "t001.vr.local"},
-        auth=("fs", "secret"),
-    )
-    assert expected_a1 in response.text
-    assert f'variable name="agent_id" value="{user.id}"' in response.text
+    store = MemoryCredStore()
+    sipcred.set_store(store)
+    try:
+        ext = Extension(tenant_id="t001", ext_number="8001", enabled=True)
+        user = User(
+            tenant_id="t001",
+            username="agent1",
+            password_hash="x",
+            role="agent",
+            must_change_password=False,
+            extension_id=1,
+        )
+        client.db.add(ext)
+        client.db.flush()
+        user.extension_id = ext.id
+        client.db.add(user)
+        client.db.commit()
+
+        # Without temporary SIP cred → not found (no DEFAULT_SIP_PASSWORD fallback)
+        missing = client.post(
+            "/fs/xml",
+            data={"section": "directory", "user": "8001", "domain": "t001.vr.local"},
+            auth=("fs", "secret"),
+        )
+        assert 'status="not found"' in missing.text
+
+        password = "temp-sip-password-xx"
+        expected_a1 = a1_hash("8001", "t001.vr.local", password)
+        sipcred.store_cred(
+            store,
+            "t001.vr.local",
+            "8001",
+            password,
+            expected_a1,
+            ttl=43200,
+            agent_id=str(user.id),
+        )
+        response = client.post(
+            "/fs/xml",
+            data={"section": "directory", "user": "8001", "domain": "t001.vr.local"},
+            auth=("fs", "secret"),
+        )
+        assert expected_a1 in response.text
+        assert f'variable name="agent_id" value="{user.id}"' in response.text
+        assert hashlib.md5(b"8001:t001.vr.local:sip-pw").hexdigest() not in response.text
+    finally:
+        sipcred.set_store(None)
 
 
 def test_dialplan_returns_unified_park_with_unknown_entry_without_db_match(client):
