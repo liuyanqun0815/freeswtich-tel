@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
@@ -15,10 +16,13 @@ from vr_api.auth import get_db, require_admin, require_password_changed, router 
 from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
 from vr_common.db import DEFAULT_TENANT
 from vr_common.ivr import publish as ivr_publish, validate as ivr_validate
-from vr_common.models import CallRecord, Gateway, IvrFlow, IvrPublish, User
+from vr_common.models import AuditLog, CallRecord, ConfigRelease, Gateway, IvrFlow, IvrPublish, User
+from vr_common.release import plan_apply, publish_ok
 
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
+
+_RELEASE_KINDS = frozenset({"gateway_update", "gateway_create", "acl"})
 
 
 class GatewayCreate(BaseModel):
@@ -33,6 +37,24 @@ class GatewayOut(BaseModel):
 class IvrPublishOut(BaseModel):
     flow_id: int
     version: int
+
+
+class ReleaseRequest(BaseModel):
+    kind: str
+    name: str
+    snapshot: dict[str, Any]
+    needs_register: bool = True
+    reged: bool = False
+    command_ok: bool = True
+
+
+class ReleaseOut(BaseModel):
+    status: str
+    plan: list[str]
+
+
+class RecordingOut(BaseModel):
+    path: str
 
 
 @app.post("/gateways", response_model=GatewayOut, status_code=status.HTTP_201_CREATED)
@@ -81,6 +103,57 @@ def publish_ivr(
     return IvrPublishOut(flow_id=flow_id, version=published["version"])
 
 
+@app.post("/releases", response_model=ReleaseOut)
+def create_release(
+    body: ReleaseRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_admin)],
+) -> ReleaseOut:
+    if body.kind not in _RELEASE_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="only gateway and ACL releases are supported",
+        )
+    plan = plan_apply(body.kind, body.name)
+    ok = body.command_ok and publish_ok(body.reged, body.needs_register)
+    release_status = "applied" if ok else "failed"
+
+    previous = db.scalars(
+        select(ConfigRelease)
+        .where(
+            ConfigRelease.tenant_id == DEFAULT_TENANT,
+            ConfigRelease.status == "applied",
+        )
+        .order_by(ConfigRelease.id.desc())
+        .limit(1)
+    ).first()
+    before: dict[str, Any] | None = None
+    if previous is not None:
+        try:
+            before = json.loads(previous.snapshot_json)
+        except json.JSONDecodeError:
+            before = None
+
+    row = ConfigRelease(
+        tenant_id=DEFAULT_TENANT,
+        snapshot_json=json.dumps(body.snapshot, ensure_ascii=False),
+        status=release_status,
+        applied_at=datetime.now(timezone.utc) if ok else None,
+    )
+    db.add(row)
+    db.add(
+        AuditLog(
+            tenant_id=DEFAULT_TENANT,
+            actor=user.username,
+            action=f"publish_{body.kind}",
+            before_json=json.dumps(before, ensure_ascii=False) if before is not None else None,
+            after_json=json.dumps(body.snapshot, ensure_ascii=False),
+        )
+    )
+    db.commit()
+    return ReleaseOut(status=release_status, plan=plan)
+
+
 @app.get("/cdr")
 def list_cdr(
     db: Annotated[Session, Depends(get_db)],
@@ -121,3 +194,32 @@ def list_cdr(
         "items": [call_record_to_item(r) for r in records],
         "summary": build_cdr_summary(records),
     }
+
+
+@app.get("/cdr/{call_id}/recording", response_model=RecordingOut)
+def get_recording(
+    call_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_password_changed)],
+) -> RecordingOut:
+    record = db.scalars(
+        select(CallRecord).where(
+            CallRecord.vr_call_id == call_id,
+            CallRecord.tenant_id == DEFAULT_TENANT,
+        )
+    ).first()
+    if record is None or not record.record_url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="recording not found")
+
+    token = secrets.token_urlsafe(24)
+    db.add(
+        AuditLog(
+            tenant_id=DEFAULT_TENANT,
+            actor=user.username,
+            action="play_recording",
+            before_json=None,
+            after_json=json.dumps({"call_id": call_id, "token": token}, ensure_ascii=False),
+        )
+    )
+    db.commit()
+    return RecordingOut(path=f"/media/{token}")
