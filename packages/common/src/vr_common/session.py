@@ -34,6 +34,9 @@ def session_ttl_seconds() -> int:
     return 14400
 
 
+_SESSION_FIELD_NAMES = ("call_id", "fs_node", "tenant_id", "entry", "state")
+
+
 def _session_fields(session: CallSession) -> dict[str, str]:
     return {
         "call_id": session.call_id,
@@ -68,9 +71,14 @@ def save(store: SessionStore, session: CallSession) -> None:
 
 
 def load(store: SessionStore, call_id: str) -> CallSession | None:
-    data = store.hgetall(keys.call_key(call_id))
-    if not data or "call_id" not in data:
+    ck = keys.call_key(call_id)
+    data = store.hgetall(ck)
+    if not data:
         return None
+    for field in _SESSION_FIELD_NAMES:
+        if field not in data:
+            return None
+    store.expire(ck, session_ttl_seconds())
     return CallSession(
         call_id=data["call_id"],
         fs_node=data["fs_node"],

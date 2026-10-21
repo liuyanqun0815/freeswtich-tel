@@ -78,3 +78,26 @@ def test_bind_leg_and_delete_cleans_legs():
 def test_load_missing_returns_none():
     store = FakeStore()
     assert load(store, "missing") is None
+
+
+def test_load_renews_ttl():
+    store = FakeStore()
+    sess = CallSession(
+        call_id="c1",
+        fs_node="fs1",
+        tenant_id="t001",
+        entry="e1",
+        state="parked",
+    )
+    save(store, sess)
+    ck = keys.call_key("c1")
+    store._ttls.pop(ck)
+    assert load(store, "c1") == sess
+    assert store._ttls[ck] == session_ttl_seconds()
+
+
+def test_load_incomplete_hash_returns_none():
+    store = FakeStore()
+    store.hset(keys.call_key("c1"), {"call_id": "c1", "fs_node": "fs1"})
+    assert load(store, "c1") is None
+    assert keys.call_key("c1") not in store._ttls
