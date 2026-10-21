@@ -75,9 +75,11 @@ def step(
     kind = node.get("kind")
     if kind == "collect":
         terminators = node.get("terminators") or []
-        if digit == "#" and "#" in terminators and buffer == "":
-            parent = node.get("parent_id") or _parent_id_of(snapshot, node_id)
-            return {"action": "parent", "node_id": parent}
+        if digit == "#" and "#" in terminators:
+            if buffer == "":
+                parent = node.get("parent_id") or _parent_id_of(snapshot, node_id)
+                return {"action": "parent", "node_id": parent}
+            return {"action": "complete", "node_id": node_id, "buffer": buffer}
 
     if digit is not None:
         for child in node.get("children") or []:

@@ -101,3 +101,49 @@ def test_load_incomplete_hash_returns_none():
     store.hset(keys.call_key("c1"), {"call_id": "c1", "fs_node": "fs1"})
     assert load(store, "c1") is None
     assert keys.call_key("c1") not in store._ttls
+
+
+def test_save_load_ivr_version():
+    store = FakeStore()
+    sess = CallSession(
+        call_id="c1",
+        fs_node="fs1",
+        tenant_id="t001",
+        entry="e1",
+        state="ivr",
+        ivr_version=4,
+    )
+    save(store, sess)
+    loaded = load(store, "c1")
+    assert loaded is not None
+    assert loaded.ivr_version == 4
+    assert loaded == sess
+
+    cleared = CallSession(
+        call_id="c1",
+        fs_node="fs1",
+        tenant_id="t001",
+        entry="e1",
+        state="ivr",
+        ivr_version=None,
+    )
+    save(store, cleared)
+    assert load(store, "c1") == cleared
+    assert load(store, "c1").ivr_version is None
+
+
+def test_load_legacy_session_without_ivr_version():
+    store = FakeStore()
+    store.hset(
+        keys.call_key("c1"),
+        {
+            "call_id": "c1",
+            "fs_node": "fs1",
+            "tenant_id": "t001",
+            "entry": "e1",
+            "state": "parked",
+        },
+    )
+    loaded = load(store, "c1")
+    assert loaded is not None
+    assert loaded.ivr_version is None

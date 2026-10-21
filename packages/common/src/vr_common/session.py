@@ -5,6 +5,7 @@ from vr_common import redis_keys as keys
 
 _LEGS_FIELD = "legs"
 _LEG_SEP = ","
+_IVR_VERSION_FIELD = "ivr_version"
 
 
 class SessionStore(Protocol):
@@ -28,6 +29,7 @@ class CallSession:
     tenant_id: str
     entry: str
     state: str
+    ivr_version: int | None = None
 
 
 def session_ttl_seconds() -> int:
@@ -44,7 +46,14 @@ def _session_fields(session: CallSession) -> dict[str, str]:
         "tenant_id": session.tenant_id,
         "entry": session.entry,
         "state": session.state,
+        _IVR_VERSION_FIELD: "" if session.ivr_version is None else str(session.ivr_version),
     }
+
+
+def _parse_ivr_version(raw: str | None) -> int | None:
+    if raw is None or raw == "":
+        return None
+    return int(raw)
 
 
 def _parse_legs(raw: str) -> list[str]:
@@ -85,6 +94,7 @@ def load(store: SessionStore, call_id: str) -> CallSession | None:
         tenant_id=data["tenant_id"],
         entry=data["entry"],
         state=data["state"],
+        ivr_version=_parse_ivr_version(data.get(_IVR_VERSION_FIELD)),
     )
 
 

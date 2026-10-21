@@ -61,6 +61,44 @@ def test_hash_on_empty_collect_returns_parent():
     assert result["node_id"] == "root"
 
 
+def test_hash_on_nonempty_collect_submits_buffer():
+    snapshot = {
+        "id": "root",
+        "kind": "menu",
+        "children": [
+            {
+                "digit": "1",
+                "id": "collect1",
+                "kind": "collect",
+                "terminators": ["#"],
+                "children": [{"digit": "#", "id": "bad", "kind": "hangup"}],
+            }
+        ],
+    }
+    result = step(snapshot, "collect1", "#", buffer="13800138000")
+    assert result["action"] == "complete"
+    assert result["buffer"] == "13800138000"
+    assert result["node_id"] == "collect1"
+
+
+def test_collect_hash_parent_without_explicit_parent_id():
+    snapshot = {
+        "id": "root",
+        "kind": "menu",
+        "children": [
+            {
+                "digit": "1",
+                "id": "collect1",
+                "kind": "collect",
+                "terminators": ["#"],
+            }
+        ],
+    }
+    result = step(snapshot, "collect1", "#", buffer="")
+    assert result["action"] == "parent"
+    assert result["node_id"] == "root"
+
+
 def test_in_flight_call_keeps_locked_snapshot_after_republish():
     v1 = {
         "id": "root",
@@ -148,3 +186,52 @@ def test_agent_cannot_publish_ivr():
         headers={"Authorization": f"Bearer {token}"},
     )
     assert denied.status_code == 403
+
+
+def test_publish_missing_flow_returns_404():
+    seed_user("admin-404", "admin-pass", "admin", must_change_password=False)
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin-404", "password": "admin-pass"})
+    token = login.json()["access_token"]
+    resp = client.post(
+        "/ivr/99999/publish",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_publish_invalid_draft_returns_400():
+    seed_user("admin-400", "admin-pass", "admin", must_change_password=False)
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin-400", "password": "admin-pass"})
+    token = login.json()["access_token"]
+
+    assert support.SessionLocal is not None
+    db = support.SessionLocal()
+    try:
+        flow = IvrFlow(
+            name="bad",
+            draft_json=json.dumps(
+                {
+                    "id": "root",
+                    "kind": "menu",
+                    "children": [
+                        {"digit": "1", "id": "n1", "kind": "hangup"},
+                        {"digit": "1", "id": "n2", "kind": "hangup"},
+                    ],
+                }
+            ),
+        )
+        db.add(flow)
+        db.commit()
+        db.refresh(flow)
+        flow_id = flow.id
+    finally:
+        db.close()
+
+    resp = client.post(
+        f"/ivr/{flow_id}/publish",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "duplicate_digit" in resp.json()["detail"]
