@@ -1,34 +1,27 @@
-[build-system]
-requires = ["setuptools>=75", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "vr-common"
-version = "0.1.0"
-description = "智能电话平台 monorepo"
+name = "vr-workspace"
+version = "0.0.0"
+description = "智能电话平台 monorepo 工作区"
 requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
-[tool.setuptools.packages.find]
-where = [
-    "packages/common/src",
-    "packages/api/src",
-    "packages/config/src",
-    "packages/engine/src",
-    "packages/ai/src",
-    "packages/push/src",
-]
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [
     "packages/common/src",
-    "packages/api/src",
-    "packages/config/src",
-    "packages/engine/src",
-    "packages/ai/src",
-    "packages/push/src",
+    "apps/api/src",
+    "apps/config/src",
+    "apps/engine/src",
+    "apps/ai_gw/src",
+    "apps/push/src",
 ]
