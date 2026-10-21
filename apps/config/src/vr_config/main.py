@@ -188,6 +188,8 @@ async def fs_xml(
         if cred is None:
             return _xml_response(xmlbuild.not_found_xml())
         a1 = str(cred.get("a1") or "")
+        if not a1:
+            return _xml_response(xmlbuild.not_found_xml())
         agent_id = str(cred.get("agent_id") or "") or _agent_id_for_extension(db, extension.id)
         return _xml_response(xmlbuild.directory_xml(domain, user, a1, agent_id))
 

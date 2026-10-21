@@ -14,14 +14,19 @@ from vr_common import redis_keys as keys
 from vr_common import sipcred
 from vr_common.models import Base, Extension, User
 from vr_common.security import hash_password
-from vr_common.sipcred import issue_sip_password, lookup_a1, store_cred
+from vr_common.sipcred import (
+    MemoryCredStore,
+    issue_sip_password,
+    lookup_a1,
+    store_cred,
+)
 from vr_common.xmlbuild import a1_hash
 from vr_config.main import app as config_app
 from vr_config.main import get_db as config_get_db
 
 
 def test_second_login_replaces_password():
-    store = {}
+    store = MemoryCredStore()
     store_cred(store, "t001.vr.local", "8001", "first-password-xxxx", "A1", ttl=43200)
     store_cred(store, "t001.vr.local", "8001", "second-password-xxx", "A1", ttl=43200)
     assert lookup_a1(store, "t001.vr.local", "8001", "first-password-xxxx") is None
@@ -36,12 +41,23 @@ def test_sipcred_key_shape():
     assert keys.sipcred_key("t001.vr.local", "8001") == "sipcred:t001.vr.local:8001"
 
 
+def test_memory_store_honors_ttl(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryCredStore()
+    now = {"t": 1_000_000.0}
+    monkeypatch.setattr(sipcred.time, "time", lambda: now["t"])
+    store_cred(store, "t001.vr.local", "8001", "pw-xxxxxxxxxxxxxxxx", "A1", ttl=10)
+    assert lookup_a1(store, "t001.vr.local", "8001", "pw-xxxxxxxxxxxxxxxx") == "A1"
+    now["t"] += 11
+    assert lookup_a1(store, "t001.vr.local", "8001", "pw-xxxxxxxxxxxxxxxx") is None
+    assert sipcred.get_cred(store, "t001.vr.local", "8001") is None
+
+
 @pytest.fixture
 def sip_store():
-    store: dict = {}
+    store = MemoryCredStore()
     sipcred.set_store(store)
     yield store
-    sipcred.set_store({})
+    sipcred.set_store(None)
 
 
 def _bind_extension(username: str, password: str, ext_number: str) -> User:
@@ -194,3 +210,53 @@ def test_directory_with_sipcred_returns_a1_hash(config_client, sip_store):
     assert f'variable name="agent_id" value="{user.id}"' in response.text
     assert password not in response.text
     assert hashlib.md5(f"8001:t001.vr.local:{password}".encode()).hexdigest() == a1
+
+
+def test_directory_empty_a1_returns_not_found(config_client, sip_store):
+    ext = Extension(tenant_id="t001", ext_number="8001", enabled=True)
+    config_client.db.add(ext)
+    config_client.db.commit()
+    store_cred(
+        sip_store,
+        "t001.vr.local",
+        "8001",
+        "pw-xxxxxxxxxxxxxxxx",
+        "",
+        ttl=43200,
+        agent_id="1",
+    )
+    response = config_client.post(
+        "/fs/xml",
+        data={"section": "directory", "user": "8001", "domain": "t001.vr.local"},
+        auth=("fs", "secret"),
+    )
+    assert 'status="not found"' in response.text
+
+
+def test_default_store_is_redis_backed(monkeypatch: pytest.MonkeyPatch):
+    """Production get_store() must use RedisCredStore, not a process-local dict."""
+    sipcred.set_store(None)
+    created: list[str] = []
+
+    class FakeRedis:
+        def get(self, key: str):
+            return None
+
+        def setex(self, key: str, ttl: int, value: str) -> None:
+            created.append(key)
+
+        def delete(self, key: str) -> None:
+            pass
+
+    def fake_from_url(url: str, decode_responses: bool = False):
+        assert url == "redis://127.0.0.1:6379/0"
+        assert decode_responses is True
+        return FakeRedis()
+
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    monkeypatch.setattr("redis.from_url", fake_from_url)
+    store = sipcred.get_store()
+    assert isinstance(store, sipcred.RedisCredStore)
+    store_cred(store, "t001.vr.local", "8001", "pw-xxxxxxxxxxxxxxxx", "A1", ttl=43200)
+    assert created == ["sipcred:t001.vr.local:8001"]
+    sipcred.set_store(None)
