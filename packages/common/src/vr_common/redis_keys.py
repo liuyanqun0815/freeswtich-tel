@@ -7,3 +7,7 @@ def call_key(call_id: str) -> str:
 
 def leg_key(uuid: str) -> str:
     return f"leg:{uuid}"
+
+
+def sipcred_key(domain: str, ext: str) -> str:
+    return f"sipcred:{domain}:{ext}"

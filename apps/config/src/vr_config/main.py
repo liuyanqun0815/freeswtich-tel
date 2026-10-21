@@ -13,9 +13,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from vr_common import sipcred, xmlbuild
 from vr_common.db import DEFAULT_TENANT, get_database_url
 from vr_common.models import ConfigRelease, Entry, Extension, PhoneNumber, User
-from vr_common import xmlbuild
 
 app = FastAPI(title="vr-config")
 security = HTTPBasic(auto_error=False)
@@ -66,10 +66,6 @@ def _tenant_from_domain(domain: str) -> str:
 
 def _park_timeout_seconds() -> int:
     return int(os.environ.get("RING_TIMEOUT_SECONDS", "20"))
-
-
-def _default_sip_password() -> str:
-    return os.environ.get("DEFAULT_SIP_PASSWORD", "")
 
 
 def _lookup_extension(
@@ -188,8 +184,11 @@ async def fs_xml(
         extension = _lookup_extension(db, tenant_id, user)
         if extension is None:
             return _xml_response(xmlbuild.not_found_xml())
-        a1 = xmlbuild.a1_hash(user, domain, _default_sip_password())
-        agent_id = _agent_id_for_extension(db, extension.id)
+        cred = sipcred.get_cred(sipcred.get_store(), domain, user)
+        if cred is None:
+            return _xml_response(xmlbuild.not_found_xml())
+        a1 = str(cred.get("a1") or "")
+        agent_id = str(cred.get("agent_id") or "") or _agent_id_for_extension(db, extension.id)
         return _xml_response(xmlbuild.directory_xml(domain, user, a1, agent_id))
 
     if section == "dialplan":

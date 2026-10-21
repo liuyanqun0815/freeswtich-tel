@@ -13,9 +13,13 @@ from vr_api.auth import get_db, require_admin, require_password_changed, router 
 from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
 from vr_common.db import DEFAULT_TENANT
 from vr_common.models import CallRecord, Gateway, User
+from vr_common.sipcred import get_store as get_sipcred_store
 
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
+
+# Expose shared SIP cred store for tests / future Redis adapter swap.
+sipcred_store = get_sipcred_store()
 
 
 class GatewayCreate(BaseModel):
