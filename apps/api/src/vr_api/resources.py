@@ -24,6 +24,8 @@ from vr_common.models import (
     SkillGroup,
     User,
 )
+from vr_common.esljobs import enqueue_directory_flush
+from vr_common.registration import registration_view
 from vr_common.security import hash_password
 
 router = APIRouter(tags=["resources"])
@@ -129,6 +131,10 @@ class UserIn(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class UserBindIn(BaseModel):
+    extension_id: Optional[int] = None
+
+
 def _row_dict(obj: Any, *fields: str) -> dict[str, Any]:
     data = {f: getattr(obj, f) for f in fields}
     if hasattr(obj, "tenant_id"):
@@ -149,25 +155,99 @@ def list_extensions(
     rows = db.scalars(
         select(Extension).where(Extension.tenant_id == DEFAULT_TENANT)
     ).all()
-    return {
-        "items": [
-            _row_dict(r, "ext_number", "display_name", "enabled") for r in rows
-        ]
+    owners = {
+        user.extension_id: user.username
+        for user in db.scalars(
+            select(User).where(
+                User.tenant_id == DEFAULT_TENANT,
+                User.extension_id.is_not(None),
+            )
+        ).all()
     }
+    items = []
+    for row in rows:
+        item = _row_dict(row, "ext_number", "display_name", "enabled")
+        try:
+            reg = registration_view(row.ext_number)
+        except Exception:
+            reg = {"registered": False, "contact": ""}
+        item["registered"] = reg["registered"]
+        item["contact"] = reg["contact"]
+        item["bound_username"] = owners.get(row.id) or ""
+        items.append(item)
+    return {"items": items}
 
 
-@router.post("/extensions")
+def _request_directory_flush(ext_number: str) -> None:
+    try:
+        enqueue_directory_flush(ext_number)
+    except Exception:
+        return
+
+
+def _extension_taken(db: Session, ext_number: str, exclude_id: int | None = None) -> bool:
+    stmt = select(Extension).where(
+        Extension.tenant_id == DEFAULT_TENANT,
+        Extension.ext_number == ext_number,
+    )
+    row = db.scalars(stmt).first()
+    return row is not None and row.id != exclude_id
+
+
+@router.post("/extensions", status_code=status.HTTP_201_CREATED)
 def create_extension(
     body: ExtensionIn,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
+    if _extension_taken(db, body.ext_number):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="分机号已存在")
     data = _force_tenant(body.model_dump())
     row = Extension(**data)
     db.add(row)
     db.commit()
     db.refresh(row)
+    _request_directory_flush(row.ext_number)
     return _row_dict(row, "ext_number", "display_name", "enabled")
+
+
+@router.put("/extensions/{extension_id}")
+def update_extension(
+    extension_id: int,
+    body: ExtensionIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(Extension, extension_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分机不存在")
+    if _extension_taken(db, body.ext_number, exclude_id=row.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="分机号已存在")
+    row.ext_number = body.ext_number
+    row.display_name = body.display_name
+    row.enabled = body.enabled
+    db.commit()
+    db.refresh(row)
+    _request_directory_flush(row.ext_number)
+    return _row_dict(row, "ext_number", "display_name", "enabled")
+
+
+@router.delete("/extensions/{extension_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_extension(
+    extension_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    row = db.get(Extension, extension_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分机不存在")
+    bound = db.scalar(select(User).where(User.extension_id == row.id))
+    if bound is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="分机已绑定用户")
+    ext_number = row.ext_number
+    db.delete(row)
+    db.commit()
+    _request_directory_flush(ext_number)
 
 
 # ---- gateways ----
@@ -447,25 +527,42 @@ def create_fs_node(
 # ---- users ----
 
 
+def _user_view(db: Session, row: User) -> dict[str, Any]:
+    ext_number = None
+    if row.extension_id is not None:
+        extension = db.get(Extension, row.extension_id)
+        if extension is not None:
+            ext_number = extension.ext_number
+    return {
+        "id": row.id,
+        "username": row.username,
+        "role": row.role,
+        "must_change_password": row.must_change_password,
+        "extension_id": row.extension_id,
+        "ext_number": ext_number,
+        "tenant_id": row.tenant_id,
+    }
+
+
+def _require_free_extension(
+    db: Session, extension_id: int, exclude_user_id: int | None = None
+) -> Extension:
+    extension = db.get(Extension, extension_id)
+    if extension is None or extension.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分机不存在")
+    owner = db.scalars(select(User).where(User.extension_id == extension_id)).first()
+    if owner is not None and owner.id != exclude_user_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="分机已绑定其他用户")
+    return extension
+
+
 @router.get("/users")
 def list_users(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
     rows = db.scalars(select(User).where(User.tenant_id == DEFAULT_TENANT)).all()
-    return {
-        "items": [
-            {
-                "id": r.id,
-                "username": r.username,
-                "role": r.role,
-                "must_change_password": r.must_change_password,
-                "extension_id": r.extension_id,
-                "tenant_id": r.tenant_id,
-            }
-            for r in rows
-        ]
-    }
+    return {"items": [_user_view(db, row) for row in rows]}
 
 
 @router.post("/users")
@@ -475,23 +572,38 @@ def create_user(
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
     data = _force_tenant(body.model_dump())
+    extension_id = data.get("extension_id")
+    if extension_id is not None:
+        _require_free_extension(db, extension_id)
     password = data.pop("password")
     row = User(
         username=data["username"],
         password_hash=hash_password(password),
         role=data["role"],
         must_change_password=data["must_change_password"],
-        extension_id=data.get("extension_id"),
+        extension_id=extension_id,
         tenant_id=DEFAULT_TENANT,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
-    return {
-        "id": row.id,
-        "username": row.username,
-        "role": row.role,
-        "must_change_password": row.must_change_password,
-        "extension_id": row.extension_id,
-        "tenant_id": row.tenant_id,
-    }
+    return _user_view(db, row)
+
+
+@router.put("/users/{user_id}")
+def bind_user_extension(
+    user_id: int,
+    body: UserBindIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(User, user_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    if body.extension_id is not None:
+        _require_free_extension(db, body.extension_id, exclude_user_id=row.id)
+    row.extension_id = body.extension_id
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _user_view(db, row)

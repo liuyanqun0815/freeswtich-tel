@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from vr_common.db import get_database_url
-from vr_engine.main import EngineCtx, handle_event, load_engine_ctx
+from vr_engine.main import EngineCtx, handle_event, load_engine_ctx, run_maintenance
 
 # Design §4 / §7 event names the engine must see (plain + CUSTOM subclass).
 ESL_EVENT_NAMES = (
@@ -20,6 +20,10 @@ ESL_EVENT_NAMES = (
     "BACKGROUND_JOB",
     "HEARTBEAT",
     "PLAYBACK_START",
+    "DTMF",
+    "CUSTOM sofia::register",
+    "CUSTOM sofia::unregister",
+    "CUSTOM sofia::expire",
     "CUSTOM mod_audio_stream::play",
 )
 
@@ -71,12 +75,15 @@ def _recv_until_blank(sock: socket.socket, bufsize: int = 4096) -> bytes:
 def parse_plain_event(raw: bytes | str) -> dict[str, str]:
     """Parse one ESL plain event body into a header dict."""
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+    header_text, sep, body = text.partition("\n\n")
     headers: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in header_text.splitlines():
         if not line or ":" not in line:
             continue
         key, _, value = line.partition(":")
         headers[key.strip()] = value.strip()
+    if sep and body.strip():
+        headers["_body"] = body.strip()
     return headers
 
 
@@ -85,6 +92,10 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
     transport = transport if transport is not None else ctx.transport
     if transport is None:
         raise RuntimeError("ESL transport is not connected")
+    ctx.transport = transport
+    for cmd in run_maintenance(ctx):
+        line = f"bgapi {cmd.api} {cmd.args}".strip()
+        transport.sendall((line + "\n\n").encode("utf-8"))
     while True:
         raw = transport.recv(65536)
         if not raw:

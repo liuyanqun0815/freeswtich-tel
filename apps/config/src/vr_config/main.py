@@ -136,7 +136,7 @@ def _vr_entry_for_dialplan(db: Session, tenant_id: str, destination: str | None)
     return f"did:{phone.number}"
 
 
-def _published_gateways(db: Session, tenant_id: str) -> list[dict[str, Any]]:
+def _applied_payloads(db: Session, tenant_id: str) -> list[dict[str, Any]]:
     stmt = (
         select(ConfigRelease)
         .where(
@@ -144,19 +144,34 @@ def _published_gateways(db: Session, tenant_id: str) -> list[dict[str, Any]]:
             ConfigRelease.status == "applied",
         )
         .order_by(ConfigRelease.id.desc())
-        .limit(1)
     )
-    release = db.scalars(stmt).first()
-    if release is None:
-        return []
-    try:
-        payload = json.loads(release.snapshot_json)
-    except json.JSONDecodeError:
-        return []
-    gateways = payload.get("gateways")
-    if not isinstance(gateways, list):
-        return []
+    payloads: list[dict[str, Any]] = []
+    for release in db.scalars(stmt).all():
+        try:
+            payload = json.loads(release.snapshot_json)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _latest_list(payloads: list[dict[str, Any]], key: str) -> list[Any]:
+    for payload in payloads:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _published_gateways(db: Session, tenant_id: str) -> list[dict[str, Any]]:
+    gateways = _latest_list(_applied_payloads(db, tenant_id), "gateways")
     return [g for g in gateways if isinstance(g, dict)]
+
+
+def _published_acl(db: Session, tenant_id: str) -> list[str]:
+    nodes = _latest_list(_applied_payloads(db, tenant_id), "acl")
+    return [str(node) for node in nodes]
 
 
 def _xml_response(body: str) -> Response:
@@ -202,5 +217,8 @@ async def fs_xml(
     if section == "configuration" and key_value == "sofia.conf":
         gateways = _published_gateways(db, tenant_id)
         return _xml_response(xmlbuild.gateway_xml(gateways))
+
+    if section == "configuration" and key_value == "acl.conf":
+        return _xml_response(xmlbuild.acl_xml(_published_acl(db, tenant_id)))
 
     return _xml_response(xmlbuild.not_found_xml())

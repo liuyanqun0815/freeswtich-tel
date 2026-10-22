@@ -1,0 +1,170 @@
+# 一键部署：依赖 + 平台进程 + 管理台
+# 用法（仓库根目录）:
+#   cp .env.example .env   # 按需改 JWT / FS_* / XML_CURL_*
+#   docker compose up -d --build
+#
+# FreeSWITCH 不在本 compose 内；将 xml_curl 指到宿主机 :8081
+
+name: freeswitch-tel
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: vr
+      POSTGRES_PASSWORD: vr
+      POSTGRES_DB: vr
+    ports:
+      - "5432:5432"
+    volumes:
+      - vr_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vr -d vr"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - vr_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # minio 暂不启用（录音对象存储尚未接线）
+  # minio:
+  #   image: minio/minio
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER: minio
+  #     MINIO_ROOT_PASSWORD: minio12345
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - vr_minio:/data
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["migrate"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  config:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["config"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8081:8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  push:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["push"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8082:8082"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["engine"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+      # FS 在宿主机或公网时，用 host.docker.internal / 真实 IP
+      FS_HOST: ${FS_HOST:-host.docker.internal}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+      - push
+
+  # 可选：机器人网关（当前入口未实现，仅 profile 启用）
+  ai_gw:
+    profiles: ["robot"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["ai_gw"]
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  vr_pg:
+  vr_redis:
+  # vr_minio:

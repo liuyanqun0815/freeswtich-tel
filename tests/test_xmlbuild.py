@@ -20,6 +20,7 @@ def test_directory_xml_uses_a1_hash_not_plain_password():
     xml = directory_xml("t001.vr.local", "8001", "abc123", "42")
     assert 'a1-hash' in xml
     assert "abc123" in xml
+    assert 'name="cacheable" value="true"' in xml
     assert 'name="password"' not in xml
 
 

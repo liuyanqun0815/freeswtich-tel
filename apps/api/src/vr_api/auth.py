@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from vr_common import sipcred
 from vr_common.db import get_database_url
 from vr_common.models import Extension, User
+from vr_common.registration import registration_view
 from vr_common.security import (
     create_access_token,
     create_refresh_token,
@@ -78,6 +79,16 @@ class RefreshRequest(BaseModel):
 class RefreshResponse(BaseModel):
     access_token: str
     refresh_token: str
+
+
+class MeResponse(BaseModel):
+    username: str
+    role: str
+    extension: str | None = None
+    domain: str | None = None
+    wss_url: str | None = None
+    registered: bool = False
+    contact: str = ""
 
 
 def _load_user(db: Session, user_id: int) -> User | None:
@@ -149,6 +160,35 @@ def login(body: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> LoginR
         refresh_token=create_refresh_token(user.id),
         must_change_password=user.must_change_password,
         **_sip_fields_for_user(db, user),
+    )
+
+
+@router.get("/me", response_model=MeResponse)
+def me(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_password_changed)],
+) -> MeResponse:
+    extension_number = None
+    registered = False
+    contact = ""
+    if user.extension_id is not None:
+        extension = db.get(Extension, user.extension_id)
+        if extension is not None and extension.enabled:
+            extension_number = extension.ext_number
+            try:
+                view = registration_view(extension_number)
+            except Exception:
+                view = {}
+            registered = bool(view.get("registered"))
+            contact = str(view.get("contact") or "")
+    return MeResponse(
+        username=user.username,
+        role=user.role,
+        extension=extension_number,
+        domain=sipcred.domain_for_tenant(user.tenant_id) if extension_number else None,
+        wss_url=sipcred.wss_url() if extension_number else None,
+        registered=registered,
+        contact=contact,
     )
 
 

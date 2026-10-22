@@ -11,3 +11,6 @@ def leg_key(uuid: str) -> str:
 
 def sipcred_key(domain: str, ext: str) -> str:
     return f"sipcred:{domain}:{ext}"
+
+
+ESL_JOBS = "esl:jobs"

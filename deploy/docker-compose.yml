@@ -1,3 +1,7 @@
+# 仅基础设施（Postgres / Redis；MinIO 暂不启用）
+# 完整一键（含 api/config/push/engine/web）请用仓库根目录:
+#   docker compose up -d --build
+
 services:
   postgres:
     image: postgres:16
@@ -7,14 +11,20 @@ services:
       POSTGRES_USER: vr
       POSTGRES_PASSWORD: vr
       POSTGRES_DB: vr
+    volumes:
+      - vr_pg_dev:/var/lib/postgresql/data
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
 
-  minio:
-    image: minio/minio
-    ports:
-      - "9000:9000"
-    command: server /data
+  # minio 暂不启用
+  # minio:
+  #   image: minio/minio
+  #   ports:
+  #     - "9000:9000"
+  #   command: server /data
+
+volumes:
+  vr_pg_dev:

@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from vr_api.auth import get_db, require_admin, require_password_changed, router as auth_router
+from vr_api.calls import router as calls_router
 from vr_api.resources import router as resources_router
 from vr_common.cdr import build_cdr_summary, call_record_to_item, parse_instant
-from vr_common.db import DEFAULT_TENANT
+from vr_common.db import DEFAULT_TENANT, get_database_url
+from vr_common.security import hash_password
 from vr_common.ivr import publish as ivr_publish, validate as ivr_validate
 from vr_common.models import AuditLog, CallRecord, ConfigRelease, IvrFlow, IvrPublish, User
 from vr_common.release import plan_apply
@@ -23,6 +26,43 @@ from vr_common.release import plan_apply
 app = FastAPI(title="VR API")
 app.include_router(auth_router)
 app.include_router(resources_router)
+app.include_router(calls_router)
+
+
+def bootstrap_admin() -> None:
+    username = os.environ.get("ADMIN_USERNAME", "").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        return
+    url = get_database_url()
+    if url.startswith("postgresql+asyncpg"):
+        url = url.replace("postgresql+asyncpg", "postgresql+psycopg2", 1)
+    engine = create_engine(url)
+    db = sessionmaker(bind=engine)()
+    try:
+        exists = db.scalar(select(User).where(User.username == username))
+        if exists is not None:
+            return
+        db.add(
+            User(
+                username=username,
+                password_hash=hash_password(password),
+                role="admin",
+                must_change_password=False,
+                tenant_id=DEFAULT_TENANT,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+@app.on_event("startup")
+def _bootstrap_admin() -> None:
+    try:
+        bootstrap_admin()
+    except Exception:
+        return
 
 _RELEASE_KINDS = frozenset({"gateway_update", "gateway_create", "acl"})
 _RELEASE_META_KEY = "__release_meta__"

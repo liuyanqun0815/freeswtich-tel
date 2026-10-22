@@ -33,11 +33,23 @@ export type CdrItem = {
 };
 
 type CdrPageProps = {
-  summary: CdrSummary;
-  items: CdrItem[];
+  summary?: CdrSummary;
+  items?: CdrItem[];
 };
 
-export function CdrPage({ summary, items }: CdrPageProps) {
+const EMPTY_SUMMARY: CdrSummary = {
+  fee_display: "—",
+  answer_rate: 0,
+  restricted_rate: 0,
+  answered: 0,
+  total: 0,
+  talk_sec: 0,
+};
+
+export function CdrPage({
+  summary = EMPTY_SUMMARY,
+  items = [],
+}: CdrPageProps = {}) {
   const columns: ColumnsType<CdrItem> = [
     { title: "通话 ID", dataIndex: "vr_call_id", key: "vr_call_id" },
     { title: "主叫", dataIndex: "caller", key: "caller" },

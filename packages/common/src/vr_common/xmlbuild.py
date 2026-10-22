@@ -34,6 +34,7 @@ def directory_xml(domain: str, user: str, a1: str, agent_id: str) -> str:
         f'      <user id="{user_e}">\n'
         "        <params>\n"
         f'          <param name="a1-hash" value="{a1_e}"/>\n'
+        '          <param name="cacheable" value="true"/>\n'
         "        </params>\n"
         "        <variables>\n"
         f'          <variable name="agent_id" value="{agent_e}"/>\n'
@@ -88,6 +89,34 @@ def _gateway_param_lines(gateway: dict) -> list[str]:
             f'          <param name="{escape(param_name)}" value="{escape(str(value))}"/>'
         )
     return lines
+
+
+def acl_xml(cidrs: list[str]) -> str:
+    nodes: list[str] = []
+    for raw in cidrs:
+        cidr = str(raw).strip()
+        if not cidr:
+            continue
+        if "/" not in cidr:
+            cidr = f"{cidr}/32"
+        nodes.append(
+            f'          <node type="allow" cidr="{escape(cidr)}"/>'
+        )
+    inner = "\n".join(nodes)
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+        '<document type="freeswitch/xml">\n'
+        '  <section name="configuration">\n'
+        '    <configuration name="acl.conf" description="Network Lists">\n'
+        '      <network-lists>\n'
+        '        <list name="vr_acl" default="deny">\n'
+        f"{inner}\n"
+        "        </list>\n"
+        "      </network-lists>\n"
+        "    </configuration>\n"
+        "  </section>\n"
+        "</document>\n"
+    )
 
 
 def gateway_xml(gateways: list[dict]) -> str:

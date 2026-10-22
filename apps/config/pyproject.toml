@@ -11,7 +11,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.9",
     "sqlalchemy>=2.0",
-    "vr-common @ file:../../packages/common",
+    "vr-common",
 ]
 
 [tool.setuptools.packages.find]

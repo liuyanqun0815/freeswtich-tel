@@ -224,3 +224,37 @@ def test_sofia_conf_empty_when_no_applied_snapshot(client):
     )
     assert "gw-db-only" not in response.text
     assert "<gateways" in response.text
+
+
+def test_acl_conf_uses_latest_applied_list_without_hiding_gateways(client):
+    client.db.add(
+        ConfigRelease(
+            tenant_id="t001",
+            snapshot_json=json.dumps(
+                {"gateways": [{"name": "gw-live", "profile": "external", "register": False}]}
+            ),
+            status="applied",
+        )
+    )
+    client.db.add(
+        ConfigRelease(
+            tenant_id="t001",
+            snapshot_json=json.dumps({"acl": ["10.1.1.8"], "__release_meta__": {"kind": "acl"}}),
+            status="applied",
+        )
+    )
+    client.db.commit()
+
+    acl = client.post(
+        "/fs/xml",
+        data={"section": "configuration", "key_value": "acl.conf"},
+        auth=("fs", "secret"),
+    )
+    sofia = client.post(
+        "/fs/xml",
+        data={"section": "configuration", "key_value": "sofia.conf"},
+        auth=("fs", "secret"),
+    )
+    assert 'cidr="10.1.1.8/32"' in acl.text
+    assert "gw-live" in sofia.text
+    assert "10.1.1.8" not in sofia.text

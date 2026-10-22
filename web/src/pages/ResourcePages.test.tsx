@@ -51,7 +51,10 @@ test("agent workbench shows extension and WSS only", () => {
   );
   expect(screen.getByText("坐席工作台")).toBeInTheDocument();
   expect(screen.getByText("8001")).toBeInTheDocument();
+  expect(screen.getByText("未注册")).toBeInTheDocument();
   expect(screen.getByText("wss://fs.example/wss")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "呼 叫" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "挂 断" })).toBeInTheDocument();
   expect(screen.queryByText("多租户")).not.toBeInTheDocument();
 });
 

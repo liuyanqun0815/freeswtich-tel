@@ -11,7 +11,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "sqlalchemy>=2.0",
     "PyJWT>=2.8",
-    "vr-common @ file:../../packages/common",
+    "vr-common",
 ]
 
 [tool.setuptools.packages.find]

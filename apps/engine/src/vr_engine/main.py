@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -15,13 +16,23 @@ from vr_common.commands import FsCommand, bridge
 from vr_common.db import DEFAULT_TENANT
 from vr_common.dialer import TaskWindow, next_action
 from vr_common.dispatch import offer
+from vr_common.esljobs import drain_commands
 from vr_common.inbound import EntryView, decide_park
-from vr_common.models import ConfigRelease, Entry, PhoneNumber
+from vr_common.ivr import step as ivr_step
+from vr_common.models import ConfigRelease, Entry, IvrPublish, PhoneNumber
 from vr_common.protocol import commands_for_cancel
 from vr_common.reconcile import kill_for_missing_in_redis, reconcile
+from vr_common.registration import (
+    extension_from_register_event,
+    mark_registered,
+    mark_unregistered,
+    parse_sofia_registrations,
+    replace_registered,
+)
 from vr_common.redis_keys import CDR_STREAM
 from vr_common.release import plan_apply, publish_ok
 from vr_common.session import CallSession
+from vr_common.verify_call import apply_verify_event
 
 _RELEASE_META_KEY = "__release_meta__"
 
@@ -42,6 +53,8 @@ class EngineCtx:
         default_factory=lambda: {CDR_STREAM: []}
     )
     db: Session | None = None
+    ivr_snapshots: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
+    ivr_buffers: dict[str, str] = field(default_factory=dict)
 
 
 def load_engine_ctx(
@@ -137,6 +150,41 @@ def _resolve_park_entry(
     return ctx.entries.get(dest)
 
 
+_REGED_ATTEMPTS = 3
+
+
+def esl_api(transport: Any, command: str) -> str:
+    """Run one synchronous ESL ``api`` and return the body."""
+    transport.sendall(f"api {command}\n\n".encode("utf-8"))
+    buf = b""
+    while b"\n\n" not in buf:
+        chunk = transport.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > 1_000_000:
+            break
+    header, _, rest = buf.partition(b"\n\n")
+    length = 0
+    for line in header.decode("utf-8", errors="replace").splitlines():
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1].strip())
+    body = rest
+    while length and len(body) < length:
+        more = transport.recv(4096)
+        if not more:
+            break
+        body += more
+    if length:
+        body = body[:length]
+    return body.decode("utf-8", errors="replace")
+
+
+def gateway_is_reged(transport: Any, name: str) -> bool:
+    body = esl_api(transport, f"sofia status gateway {name}")
+    return "REGED" in body
+
+
 def _send_plan_via_transport(ctx: EngineCtx, plan: list[str]) -> None:
     transport = ctx.transport
     if transport is None:
@@ -192,6 +240,279 @@ def apply_pending_release(
     return row.status
 
 
+def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:
+    """Take directory-flush jobs enqueued by the API."""
+    try:
+        commands = drain_commands()
+    except Exception:
+        return []
+    cmds: list[FsCommand] = []
+    for command in commands:
+        api, _, args = command.partition(" ")
+        cmds.append(FsCommand(api, args))
+    return cmds
+
+
+def advance_pending_releases(ctx: EngineCtx) -> list[str]:
+    """Send pending gateway/ACL plans and mark them from the ESL REGED result."""
+    session = ctx.db
+    if session is None or ctx.transport is None:
+        return []
+    rows = session.scalars(
+        select(ConfigRelease)
+        .where(
+            ConfigRelease.tenant_id == DEFAULT_TENANT,
+            ConfigRelease.status == "pending",
+        )
+        .order_by(ConfigRelease.id)
+    ).all()
+    results: list[str] = []
+    for row in rows:
+        try:
+            payload = json.loads(row.snapshot_json)
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        meta = payload.get(_RELEASE_META_KEY)
+        if not isinstance(meta, dict):
+            row.status = "failed"
+            row.applied_at = None
+            session.commit()
+            results.append("failed")
+            continue
+        kind = str(meta.get("kind") or "")
+        name = str(meta.get("name") or "")
+        needs_register = bool(meta.get("needs_register", True))
+        if not meta.get("dispatched"):
+            _send_plan_via_transport(ctx, plan_apply(kind, name))
+            meta["dispatched"] = True
+            meta["attempts"] = int(meta.get("attempts") or 0)
+        if not needs_register:
+            row.status = "applied"
+            row.applied_at = datetime.now(timezone.utc)
+            payload[_RELEASE_META_KEY] = meta
+            row.snapshot_json = json.dumps(payload, ensure_ascii=False)
+            session.commit()
+            results.append("applied")
+            continue
+        reged = False
+        try:
+            reged = gateway_is_reged(ctx.transport, name)
+        except Exception:
+            reged = False
+        if publish_ok(reged, True):
+            row.status = "applied"
+            row.applied_at = datetime.now(timezone.utc)
+            results.append("applied")
+        else:
+            attempts = int(meta.get("attempts") or 0) + 1
+            meta["attempts"] = attempts
+            if attempts >= _REGED_ATTEMPTS:
+                row.status = "failed"
+                row.applied_at = None
+                results.append("failed")
+            else:
+                results.append("pending")
+        payload[_RELEASE_META_KEY] = meta
+        row.snapshot_json = json.dumps(payload, ensure_ascii=False)
+        session.commit()
+    return results
+
+
+def sync_registrations(ctx: EngineCtx) -> None:
+    """Reconcile extension registration from sofia on each heartbeat."""
+    transport = ctx.transport
+    if transport is None or not hasattr(transport, "recv"):
+        return
+    profile = os.environ.get("FS_SIP_PROFILE", "internal")
+    try:
+        body = esl_api(transport, f"sofia status profile {profile} reg")
+    except Exception:
+        return
+    if "Registrations" not in body and "Total items returned" not in body:
+        return
+    try:
+        replace_registered(parse_sofia_registrations(body))
+    except Exception:
+        return
+
+
+def run_maintenance(ctx: EngineCtx) -> list[FsCommand]:
+    flush = drain_flush_commands(ctx)
+    advance_pending_releases(ctx)
+    sync_registrations(ctx)
+    return flush
+
+
+def _load_ivr(ctx: EngineCtx, flow_key: str) -> tuple[int, dict[str, Any]] | None:
+    cached = ctx.ivr_snapshots.get(flow_key)
+    if cached is not None:
+        return cached
+    if ctx.db is None or not str(flow_key).isdigit():
+        return None
+    row = ctx.db.scalars(
+        select(IvrPublish)
+        .where(
+            IvrPublish.flow_id == int(flow_key),
+            IvrPublish.tenant_id == DEFAULT_TENANT,
+        )
+        .order_by(IvrPublish.version.desc())
+    ).first()
+    if row is None:
+        return None
+    try:
+        snapshot = json.loads(row.snapshot_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    loaded = (row.version, snapshot)
+    ctx.ivr_snapshots[flow_key] = loaded
+    return loaded
+
+
+def _find_ivr_node(snapshot: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+    if snapshot.get("id") == node_id:
+        return snapshot
+    for child in snapshot.get("children") or []:
+        if isinstance(child, dict):
+            found = _find_ivr_node(child, node_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _node_prompt(snapshot: dict[str, Any], node_id: str) -> str:
+    node = _find_ivr_node(snapshot, node_id)
+    if node is None:
+        return ""
+    prompt = node.get("prompt") or node.get("file") or ""
+    return str(prompt) if prompt else ""
+
+
+def _ivr_follow(
+    uuid: str,
+    call_id: str,
+    snapshot: dict[str, Any],
+    result: dict[str, Any],
+    node_id: str,
+) -> tuple[str, list[FsCommand]]:
+    action = str(result.get("action") or "")
+    next_node = str(result.get("node_id") or node_id)
+    cmds: list[FsCommand] = []
+    if action == "replay":
+        prompt = _node_prompt(snapshot, node_id)
+        if prompt:
+            cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+        return node_id, cmds
+    if action in {"parent", "goto"}:
+        kind = str(result.get("kind") or "")
+        target = result.get("target")
+        if kind == "hangup":
+            cmds.append(FsCommand("uuid_kill", uuid))
+        elif kind == "queue" and target:
+            cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
+        elif kind == "extension" and target:
+            cmds.append(FsCommand("uuid_transfer", f"{uuid} user/{target}"))
+        elif kind == "robot" and target:
+            cmds.extend(
+                decide_park(
+                    None,
+                    "inbound",
+                    EntryView(kind="robot", target=str(target)),
+                    "enabled",
+                    uuid,
+                    call_id,
+                )
+            )
+        else:
+            prompt = str(result.get("prompt") or "") or _node_prompt(snapshot, next_node)
+            if prompt:
+                cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+            cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_node={next_node}"))
+        return next_node, cmds
+    if action == "complete":
+        cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_collect={result.get('buffer', '')}"))
+        return node_id, cmds
+    return node_id, cmds
+
+
+def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[FsCommand]:
+    loaded = _load_ivr(ctx, flow_key)
+    if loaded is None:
+        return decide_park(None, "inbound", None, "disabled", uuid, call_id)
+    version, snapshot = loaded
+    node_id = str(snapshot.get("id") or "root")
+    ctx.sessions[call_id] = CallSession(
+        call_id=call_id,
+        fs_node="",
+        tenant_id=DEFAULT_TENANT,
+        entry=f"ivr:{flow_key}",
+        state=f"ivr:{node_id}",
+        ivr_version=version,
+    )
+    cmds = [FsCommand("uuid_answer", uuid)]
+    prompt = _node_prompt(snapshot, node_id)
+    if prompt:
+        cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+    cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"))
+    return cmds
+
+
+def _commands_for_entry(
+    ctx: EngineCtx, entry: EntryView, uuid: str, call_id: str
+) -> list[FsCommand]:
+    if entry.kind == "ivr":
+        return _enter_ivr(ctx, entry.target, uuid, call_id)
+    if entry.kind == "extension":
+        return [
+            FsCommand("uuid_answer", uuid),
+            FsCommand("uuid_transfer", f"{uuid} user/{entry.target}"),
+        ]
+    if entry.kind == "queue":
+        return [
+            FsCommand("uuid_answer", uuid),
+            FsCommand("uuid_setvar", f"{uuid} vr_skill_group={entry.target}"),
+        ]
+    if entry.kind == "playback":
+        return [
+            FsCommand("uuid_answer", uuid),
+            FsCommand("uuid_broadcast", f"{uuid} {entry.target} aleg"),
+        ]
+    return []
+
+
+def _handle_dtmf(ctx: EngineCtx, event: dict[str, Any], call_id: str, uuid: str) -> list[FsCommand]:
+    session = ctx.sessions.get(call_id)
+    if session is None or not session.state.startswith("ivr:") or not session.entry.startswith("ivr:"):
+        return []
+    flow_key = session.entry.split(":", 1)[1]
+    loaded = _load_ivr(ctx, flow_key)
+    if loaded is None:
+        return []
+    _version, snapshot = loaded
+    node_id = session.state.split(":", 1)[1]
+    digit = event.get("DTMF-Digit")
+    buffer = ctx.ivr_buffers.get(call_id, "")
+    result = ivr_step(snapshot, node_id, digit, buffer=buffer)
+    if result.get("action") == "noop" and digit and digit not in {"*", "#"}:
+        ctx.ivr_buffers[call_id] = buffer + str(digit)
+        return []
+    if result.get("action") == "complete":
+        ctx.ivr_buffers.pop(call_id, None)
+    next_node, cmds = _ivr_follow(uuid, call_id, snapshot, result, node_id)
+    ctx.sessions[call_id] = CallSession(
+        call_id=session.call_id,
+        fs_node=session.fs_node,
+        tenant_id=session.tenant_id,
+        entry=session.entry,
+        state=f"ivr:{next_node}",
+        ivr_version=session.ivr_version,
+    )
+    return cmds
+
+
 def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
     """Route one ESL event through shared decisions; append cmds to ``ctx.sent``."""
     event_name = event.get("Event-Name", "")
@@ -203,7 +524,17 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
     uuid = event.get("Unique-ID", "")
     cmds: list[FsCommand] = []
 
-    if event_name == "CHANNEL_PARK":
+    subclass = str(event.get("Event-Subclass") or "")
+    if event_name == "CUSTOM" and subclass.startswith("sofia::"):
+        try:
+            ext = extension_from_register_event(event)
+            if ext and subclass == "sofia::register":
+                mark_registered(ext, str(event.get("contact") or ""))
+            elif ext and subclass in {"sofia::unregister", "sofia::expire"}:
+                mark_unregistered(ext)
+        except Exception:
+            pass
+    elif event_name == "CHANNEL_PARK":
         existing = ctx.sessions.get(call_id)
         if existing is None:
             dest = event.get("Caller-Destination-Number", "")
@@ -223,6 +554,18 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 uuid,
                 call_id,
             )
+            explicit_entry = bool(event.get("variable_vr_entry"))
+            if (
+                not cmds
+                and entry is not None
+                and number_status != "disabled"
+                and (direction == "inbound" or explicit_entry)
+            ):
+                cmds = _commands_for_entry(ctx, entry, uuid, call_id)
+    elif event_name == "DTMF":
+        cmds = _handle_dtmf(ctx, event, call_id, uuid)
+    elif event_name == "HEARTBEAT":
+        cmds = run_maintenance(ctx)
     elif event_name == "VR_BRIDGE":
         cmds = bridge(str(event["a_uuid"]), str(event["b_uuid"]))
     elif event_name == "VR_CANCEL":
@@ -267,10 +610,18 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         "VR_DIAL",
         "VR_RECONCILE",
         "VR_RELEASE_APPLY",
+        "HEARTBEAT",
+        "DTMF",
+        "CUSTOM",
     }:
         row = ctx.cdr_rows.get(call_id, {})
         updated = apply_event(row, _cdr_payload(event, call_id))
         ctx.cdr_rows[call_id] = updated
         _xadd_cdr(ctx, updated)
+
+    try:
+        apply_verify_event(event, cmds)
+    except Exception:
+        pass
 
     return cmds
