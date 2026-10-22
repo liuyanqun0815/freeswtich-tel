@@ -163,6 +163,11 @@ export function AgentWorkbenchPage({
       {softphone.error ? (
         <Typography.Paragraph type="danger">{softphone.error}</Typography.Paragraph>
       ) : null}
+      {softphone.trace ? (
+        <Typography.Paragraph type="secondary" style={{ whiteSpace: "pre-wrap" }}>
+          {softphone.trace}
+        </Typography.Paragraph>
+      ) : null}
       {softphone.incoming ? (
         <Space style={{ marginBottom: 12 }}>
           <span>来电 {softphone.incoming}</span>

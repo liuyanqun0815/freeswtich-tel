@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +34,8 @@ from vr_common.redis_keys import CDR_STREAM
 from vr_common.release import plan_apply, publish_ok
 from vr_common.session import CallSession
 from vr_common.verify_call import apply_verify_event
+
+logger = logging.getLogger("vr.engine")
 
 _RELEASE_META_KEY = "__release_meta__"
 
@@ -329,12 +332,17 @@ def sync_registrations(ctx: EngineCtx) -> None:
     try:
         body = esl_api(transport, f"sofia status profile {profile} reg")
     except Exception:
+        logger.exception("sofia reg sync failed profile=%s", profile)
         return
     if "Registrations" not in body and "Total items returned" not in body:
+        logger.info("sofia reg sync skipped profile=%s reason=not-a-registration-list", profile)
         return
     try:
-        replace_registered(parse_sofia_registrations(body))
+        found = parse_sofia_registrations(body)
+        logger.info("sofia reg sync profile=%s extensions=%s", profile, ",".join(found) or "-")
+        replace_registered(found)
     except Exception:
+        logger.exception("sofia reg sync apply failed profile=%s", profile)
         return
 
 
@@ -528,12 +536,14 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
     if event_name == "CUSTOM" and subclass.startswith("sofia::"):
         try:
             ext = extension_from_register_event(event)
+            contact = str(event.get("contact") or "")
+            logger.info("sofia event=%s ext=%s contact=%s", subclass, ext or "-", contact or "-")
             if ext and subclass == "sofia::register":
-                mark_registered(ext, str(event.get("contact") or ""))
+                mark_registered(ext, contact)
             elif ext and subclass in {"sofia::unregister", "sofia::expire"}:
                 mark_unregistered(ext)
         except Exception:
-            pass
+            logger.exception("sofia registration update failed subclass=%s", subclass)
     elif event_name == "CHANNEL_PARK":
         existing = ctx.sessions.get(call_id)
         if existing is None:

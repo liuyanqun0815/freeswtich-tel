@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 from collections.abc import Generator
@@ -16,6 +17,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from vr_common import sipcred, xmlbuild
 from vr_common.db import DEFAULT_TENANT, get_database_url
 from vr_common.models import ConfigRelease, Entry, Extension, PhoneNumber, User
+
+logger = logging.getLogger("vr.config")
 
 app = FastAPI(title="vr-config")
 security = HTTPBasic(auto_error=False)
@@ -198,14 +201,18 @@ async def fs_xml(
         tenant_id = _tenant_from_domain(domain)
         extension = _lookup_extension(db, tenant_id, user)
         if extension is None:
+            logger.info("directory user=%s domain=%s result=extension-missing", user, domain)
             return _xml_response(xmlbuild.not_found_xml())
         cred = sipcred.get_cred(sipcred.get_store(), domain, user)
         if cred is None:
+            logger.info("directory user=%s domain=%s result=no-sip-cred", user, domain)
             return _xml_response(xmlbuild.not_found_xml())
         a1 = str(cred.get("a1") or "")
         if not a1:
+            logger.info("directory user=%s domain=%s result=empty-a1", user, domain)
             return _xml_response(xmlbuild.not_found_xml())
         agent_id = str(cred.get("agent_id") or "") or _agent_id_for_extension(db, extension.id)
+        logger.info("directory user=%s domain=%s result=ok", user, domain)
         return _xml_response(xmlbuild.directory_xml(domain, user, a1, agent_id))
 
     if section == "dialplan":
@@ -221,4 +228,11 @@ async def fs_xml(
     if section == "configuration" and key_value == "acl.conf":
         return _xml_response(xmlbuild.acl_xml(_published_acl(db, tenant_id)))
 
+    logger.info(
+        "xml_curl section=%s user=%s domain=%s key=%s result=not-found",
+        section,
+        user,
+        domain,
+        key_value,
+    )
     return _xml_response(xmlbuild.not_found_xml())

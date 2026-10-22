@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from typing import Annotated, Any
 
@@ -22,6 +23,8 @@ from vr_common.security import (
     hash_password,
     verify_password,
 )
+
+logger = logging.getLogger("vr.api.auth")
 
 _engine = None
 SessionLocal: sessionmaker[Session] | None = None
@@ -154,12 +157,22 @@ def _sip_fields_for_user(db: Session, user: User) -> dict[str, Any]:
 def login(body: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> LoginResponse:
     user = db.scalar(select(User).where(User.username == body.username))
     if user is None or not verify_password(body.password, user.password_hash):
+        logger.info("login rejected username=%s", body.username)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    fields = _sip_fields_for_user(db, user)
+    logger.info(
+        "login user=%s extension=%s domain=%s wss=%s sip_cred=%s",
+        user.username,
+        fields.get("extension") or "-",
+        fields.get("domain") or "-",
+        fields.get("wss_url") or "-",
+        "issued" if fields.get("sip_password") else "none",
+    )
     return LoginResponse(
         access_token=create_access_token(user.id, user.role, user.tenant_id),
         refresh_token=create_refresh_token(user.id),
         must_change_password=user.must_change_password,
-        **_sip_fields_for_user(db, user),
+        **fields,
     )
 
 
@@ -178,9 +191,17 @@ def me(
             try:
                 view = registration_view(extension_number)
             except Exception:
+                logger.exception("auth/me registration lookup failed extension=%s", extension_number)
                 view = {}
             registered = bool(view.get("registered"))
             contact = str(view.get("contact") or "")
+    logger.info(
+        "auth/me user=%s extension=%s registered=%s contact=%s",
+        user.username,
+        extension_number or "-",
+        registered,
+        contact or "-",
+    )
     return MeResponse(
         username=user.username,
         role=user.role,

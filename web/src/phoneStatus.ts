@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, getToken } from "./auth";
 
 export type PhoneStatus = {
@@ -21,6 +21,7 @@ const EMPTY: PhoneStatus = {
 
 export function usePhoneStatus(): PhoneStatus {
   const [status, setStatus] = useState<PhoneStatus>(EMPTY);
+  const reported = useRef("");
 
   useEffect(() => {
     let stop = false;
@@ -35,6 +36,7 @@ export function usePhoneStatus(): PhoneStatus {
       try {
         const resp = await api("/auth/me");
         if (!resp.ok || stop) {
+          console.warn("[auth/me] HTTP", resp.status);
           return;
         }
         const data = (await resp.json()) as {
@@ -45,14 +47,20 @@ export function usePhoneStatus(): PhoneStatus {
           contact?: string | null;
         };
         if (!stop) {
-          setStatus({
+          const next = {
             extension: data.extension ?? "",
             domain: data.domain ?? "",
             wssUrl: data.wss_url ?? "",
             registered: Boolean(data.registered),
             contact: data.contact ?? "",
             ready: true,
-          });
+          };
+          const summary = `${next.extension} registered=${next.registered} contact=${next.contact} wss=${next.wssUrl}`;
+          if (reported.current !== summary) {
+            reported.current = summary;
+            console.info("[auth/me]", summary);
+          }
+          setStatus(next);
         }
       } catch {
         return;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from typing import Any
@@ -110,6 +111,10 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     host = os.environ.get("FS_HOST", "127.0.0.1")
     port = os.environ.get("FS_ESL_PORT", "8021")
     password = os.environ.get("FS_ESL_PASSWORD", "ClueCon")

@@ -66,6 +66,12 @@ export function AdminLayout({
         return;
       }
       const sip = sipProfileFromLogin(data);
+      console.info(
+        "[auth] login",
+        sip
+          ? { extension: sip.extension, domain: sip.domain, wssUrl: sip.wssUrl }
+          : { sip: false },
+      );
       setSession(data.access_token, values.username, sip);
       setUsername(values.username);
       message.success(sip ? `已登录，正在注册分机 ${sip.extension}` : "已登录");

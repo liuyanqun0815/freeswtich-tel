@@ -18,6 +18,7 @@ type CallState = "idle" | "calling" | "in-call";
 export type SoftphoneApi = {
   status: SoftphoneStatus;
   error: string;
+  trace: string;
   extension: string;
   incoming: string;
   callState: CallState;
@@ -31,6 +32,7 @@ export type SoftphoneApi = {
 const IDLE: SoftphoneApi = {
   status: "idle",
   error: "",
+  trace: "",
   extension: "",
   incoming: "",
   callState: "idle",
@@ -66,11 +68,24 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
   const userRef = useRef<Web.SimpleUser | null>(null);
   const profileRef = useRef<SipProfile | null>(null);
   const generation = useRef(0);
+  const lastWarn = useRef("");
+  const sawRegistered = useRef(false);
   const [status, setStatus] = useState<SoftphoneStatus>("idle");
   const [error, setError] = useState("");
+  const [trace, setTrace] = useState("");
   const [extension, setExtension] = useState("");
   const [incoming, setIncoming] = useState("");
   const [callState, setCallState] = useState<CallState>("idle");
+
+  const note = useCallback((message: string) => {
+    const line = `${new Date().toLocaleTimeString()} ${message}`;
+    console.info("[softphone]", message);
+    setTrace((prev) => {
+      const lines = prev ? prev.split("\n") : [];
+      lines.push(line);
+      return lines.slice(-8).join("\n");
+    });
+  }, []);
 
   const stopUser = useCallback(async (user: Web.SimpleUser | null) => {
     if (!user) {
@@ -98,6 +113,11 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (!profile || !audioRef.current) {
+      note(
+        profile
+          ? "未开始注册：音频元件尚未就绪"
+          : "未开始注册：登录响应里没有分机或 SIP 密码",
+      );
       profileRef.current = null;
       setStatus("idle");
       setError("");
@@ -107,9 +127,12 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
       return;
     }
     profileRef.current = profile;
+    sawRegistered.current = false;
+    lastWarn.current = "";
     setExtension(profile.extension);
     setStatus("registering");
     setError("");
+    note(`开始注册 ${profile.extension}@${profile.domain} -> ${profile.wssUrl}`);
     const user = new Web.SimpleUser(profile.wssUrl, {
       aor: sipAor(profile),
       media: { remote: { audio: audioRef.current } },
@@ -117,6 +140,19 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         authorizationUsername: profile.extension,
         authorizationPassword: profile.password,
         displayName: profile.extension,
+        logLevel: "log",
+        logConfiguration: false,
+        logConnector: (_level, _category, _label, content) => {
+          if (_level !== "warn" && _level !== "error") {
+            return;
+          }
+          const text = String(content).split("\n")[0].slice(0, 300);
+          lastWarn.current = text;
+          console.warn("[sip]", text);
+          if (mine === generation.current) {
+            setError(text);
+          }
+        },
         sessionDescriptionHandlerFactoryOptions: {
           peerConnectionConfiguration: { iceServers: profile.iceServers },
         },
@@ -127,11 +163,20 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (mine !== generation.current) {
           return;
         }
+        note(`SIP 注册成功 ${profile.extension}@${profile.domain}`);
+        sawRegistered.current = true;
         setStatus("registered");
         setError("");
       },
       onUnregistered: () => {
         if (mine !== generation.current) {
+          return;
+        }
+        const reason = lastWarn.current;
+        note(reason ? `SIP 未注册：${reason}` : "SIP 未注册，没有收到 200");
+        if (!sawRegistered.current) {
+          setStatus("failed");
+          setError(reason || "注册未成功，FreeSWITCH 没有返回 200");
           return;
         }
         setStatus((current) => (current === "failed" ? current : "idle"));
@@ -140,8 +185,10 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (mine !== generation.current) {
           return;
         }
+        const text = err ? errorText(err) : "与 FreeSWITCH 的 WebSocket 已断开";
+        note(text);
         setStatus("failed");
-        setError(err ? errorText(err) : "与 FreeSWITCH 的 WebSocket 已断开");
+        setError(text);
       },
       onCallCreated: () => {
         if (mine !== generation.current) {
@@ -173,22 +220,29 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     };
     userRef.current = user;
     try {
+      note(`WebSocket 连接中 ${profile.wssUrl}`);
       await user.connect();
       if (mine !== generation.current) {
         await stopUser(user);
         return;
       }
+      note("WebSocket 已连接，正在发送 REGISTER");
       await user.register();
+      if (mine === generation.current) {
+        note("REGISTER 已发出，等待 FreeSWITCH 响应");
+      }
     } catch (err) {
+      const text = errorText(err);
+      note(text);
       if (mine !== generation.current) {
         return;
       }
       setStatus("failed");
-      setError(errorText(err));
+      setError(text);
       userRef.current = null;
       await stopUser(user);
     }
-  }, [stopUser]);
+  }, [note, stopUser]);
 
   useEffect(() => {
     void start();
@@ -217,6 +271,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     () => ({
       status,
       error,
+      trace,
       extension,
       incoming,
       callState,
@@ -256,13 +311,14 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         saveSipProfile(null);
         setStatus("idle");
         setError("");
+        setTrace("");
         setExtension("");
         setIncoming("");
         setCallState("idle");
         await stopUser(user);
       },
     }),
-    [status, error, extension, incoming, callState, stopUser],
+    [status, error, trace, extension, incoming, callState, stopUser],
   );
 
   return (
