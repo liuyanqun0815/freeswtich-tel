@@ -16,7 +16,7 @@ type AdminLayoutProps = {
 };
 
 export function AdminLayout({
-  activeMenu = "话单",
+  activeMenu = "坐席工作台",
   onMenuSelect,
   tabItems = [{ key: "cdr", label: "话单", children: null }],
   children,

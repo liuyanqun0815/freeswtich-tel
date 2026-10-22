@@ -37,7 +37,7 @@ const PAGE_BY_MENU: Record<string, () => ReactNode> = {
 };
 
 export function App() {
-  const [activeMenu, setActiveMenu] = useState("话单");
+  const [activeMenu, setActiveMenu] = useState("坐席工作台");
   const content = useMemo(() => {
     const render = PAGE_BY_MENU[activeMenu] ?? (() => <CdrPage />);
     return render();

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import time
 from typing import Any
 
 from sqlalchemy import create_engine
@@ -28,7 +29,14 @@ ESL_EVENT_NAMES = (
     "CUSTOM mod_audio_stream::play",
 )
 
+logger = logging.getLogger("vr.engine.esl")
+
 _SessionLocal: sessionmaker[Session] | None = None
+_ESL_TIMEOUT_SECONDS = 10
+
+
+class EslError(RuntimeError):
+    """FreeSWITCH closed or rejected the inbound ESL handshake."""
 
 
 def _sync_database_url() -> str:
@@ -48,12 +56,37 @@ def _session_factory() -> sessionmaker[Session]:
 
 def connect(host: str, port: int | str, password: str) -> socket.socket:
     """Inbound ESL: TCP connect, ``auth``, then ``event plain`` for design events."""
-    sock = socket.create_connection((host, int(port)))
-    _recv_until_blank(sock)
-    _send_esl(sock, f"auth {password}")
-    _recv_until_blank(sock)
-    _send_esl(sock, "event plain " + " ".join(ESL_EVENT_NAMES))
-    _recv_until_blank(sock)
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=_ESL_TIMEOUT_SECONDS)
+    except OSError as exc:
+        raise EslError(f"无法连接 FreeSWITCH ESL {host}:{port}：{exc}") from exc
+    sock.settimeout(_ESL_TIMEOUT_SECONDS)
+    try:
+        banner = _recv_until_blank(sock, "等待认证请求")
+        _require_auth_request(banner)
+        _send_esl(sock, f"auth {password}")
+        auth_reply = _recv_until_blank(sock, "等待认证结果")
+        _require_ok(auth_reply, "ESL 认证")
+        _send_esl(sock, "event plain " + " ".join(ESL_EVENT_NAMES))
+        event_reply = _recv_until_blank(sock, "等待事件订阅结果")
+        _require_ok(event_reply, "事件订阅")
+    except EslError:
+        sock.close()
+        raise
+    except (TimeoutError, socket.timeout) as exc:
+        sock.close()
+        raise EslError(
+            f"等待 FreeSWITCH ESL 响应超时（{host}:{port}）。"
+            "端口能连通，但没有完成认证。请确认 event_socket 正在监听，并且 ACL 没有丢弃引擎的连接。"
+        ) from exc
+    except (BrokenPipeError, ConnectionError, OSError) as exc:
+        sock.close()
+        raise EslError(
+            f"FreeSWITCH 在认证后关闭了连接（{host}:{port}）。"
+            "请核对 FS_ESL_PASSWORD 是否与 event_socket.conf.xml 的 password 一致，"
+            "并放行引擎容器访问 8021 的地址。"
+        ) from exc
+    sock.settimeout(None)
     return sock
 
 
@@ -61,7 +94,7 @@ def _send_esl(sock: socket.socket, line: str) -> None:
     sock.sendall((line + "\n\n").encode("utf-8"))
 
 
-def _recv_until_blank(sock: socket.socket, bufsize: int = 4096) -> bytes:
+def _recv_until_blank(sock: socket.socket, step: str, bufsize: int = 4096) -> bytes:
     chunks: list[bytes] = []
     data = b""
     while b"\n\n" not in data:
@@ -70,7 +103,50 @@ def _recv_until_blank(sock: socket.socket, bufsize: int = 4096) -> bytes:
             break
         chunks.append(chunk)
         data = b"".join(chunks)
+    if b"\n\n" not in data:
+        if data:
+            raise EslError(f"{step}：FreeSWITCH 关闭了连接，已收到：{_reply_text(data)}")
+        raise EslError(
+            f"{step}：FreeSWITCH 接受连接后立即关闭。"
+            "请检查 event_socket 的 apply-inbound-acl（默认 loopback.auto 只允许本机），"
+            "并确认 8021 上是 mod_event_socket。"
+        )
     return data
+
+
+def _reply_text(raw: bytes) -> str:
+    text = raw.decode("utf-8", errors="replace")
+    kept: list[str] = []
+    for line in text.splitlines():
+        lowered = line.lower()
+        if lowered.startswith("content-type:") or lowered.startswith("reply-text:"):
+            kept.append(line.strip())
+    return "；".join(kept) if kept else "无响应"
+
+
+def _require_auth_request(raw: bytes) -> None:
+    text = raw.decode("utf-8", errors="replace").lower()
+    if "rude-rejection" in text:
+        raise EslError(
+            "FreeSWITCH 拒绝了引擎地址（text/rude-rejection）。"
+            "请修改 event_socket.conf.xml 的 apply-inbound-acl，放行引擎容器所在网段，不要只保留 loopback.auto。"
+        )
+    if "auth/request" not in text:
+        raise EslError(f"未收到 ESL auth/request：{_reply_text(raw)}")
+
+
+def _require_ok(raw: bytes, step: str) -> None:
+    text = raw.decode("utf-8", errors="replace")
+    if "rude-rejection" in text.lower():
+        _require_auth_request(raw)
+    if "+OK" in text:
+        return
+    detail = _reply_text(raw)
+    if "-ERR" in text and "invalid" in text.lower():
+        raise EslError(
+            f"{step}失败：{detail}。请核对 FS_ESL_PASSWORD 与 event_socket.conf.xml 的 password。"
+        )
+    raise EslError(f"{step}失败：{detail}")
 
 
 def parse_plain_event(raw: bytes | str) -> dict[str, str]:
@@ -118,7 +194,13 @@ def main() -> None:
     host = os.environ.get("FS_HOST", "127.0.0.1")
     port = os.environ.get("FS_ESL_PORT", "8021")
     password = os.environ.get("FS_ESL_PASSWORD", "ClueCon")
-    sock = connect(host, port, password)
+    while True:
+        try:
+            sock = connect(host, port, password)
+            break
+        except EslError as exc:
+            logger.error("%s", exc)
+            time.sleep(5)
     db = _session_factory()()
     ctx = load_engine_ctx(db)
     ctx.transport = sock
