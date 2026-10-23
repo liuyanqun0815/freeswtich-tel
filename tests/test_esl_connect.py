@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from vr_engine.reader import EslError, connect
+from vr_engine.reader import EslError, connect, parse_plain_event
 
 
 def _serve(handler) -> int:
@@ -72,3 +72,15 @@ def test_successful_handshake_subscribes_events() -> None:
     assert b"auth secret" in seen["auth"]
     assert b"event plain" in seen["event"]
     assert b"CUSTOM sofia::register" in seen["event"]
+
+
+def test_plain_event_decodes_vr_entry() -> None:
+    event = parse_plain_event(
+        "Event-Name: CHANNEL_PARK\n"
+        "Unique-ID: d1a6b486-c6d0-46cb-835f-4b0317d4a79f\n"
+        "Caller-Destination-Number: 1001\n"
+        "Caller-Direction: inbound\n"
+        "variable_vr_entry: extension%3A1001\n"
+        "\n"
+    )
+    assert event["variable_vr_entry"] == "extension:1001"

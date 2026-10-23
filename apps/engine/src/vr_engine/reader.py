@@ -7,6 +7,7 @@ import os
 import socket
 import time
 from typing import Any
+from urllib.parse import unquote
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -158,7 +159,7 @@ def parse_plain_event(raw: bytes | str) -> dict[str, str]:
         if not line or ":" not in line:
             continue
         key, _, value = line.partition(":")
-        headers[key.strip()] = value.strip()
+        headers[key.strip()] = unquote(value.strip())
     if sep and body.strip():
         headers["_body"] = body.strip()
     return headers
