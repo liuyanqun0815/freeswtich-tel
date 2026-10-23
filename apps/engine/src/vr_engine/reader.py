@@ -179,8 +179,26 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
         if not raw:
             break
         event = parse_plain_event(raw)
-        if not event.get("Event-Name"):
+        event_name = event.get("Event-Name")
+        if not event_name:
+            reply = event.get("Reply-Text") or event.get("_body") or ""
+            content_type = event.get("Content-Type") or ""
+            reply_log = logger.error if "-ERR" in reply else logger.info
+            reply_log(
+                "esl reply content_type=%s reply=%s",
+                content_type or "-",
+                reply.replace("\n", " ")[:500] or "-",
+            )
             continue
+        if event_name == "BACKGROUND_JOB":
+            body = (event.get("_body") or "").replace("\n", " ")
+            job_log = logger.error if "-ERR" in body else logger.info
+            job_log(
+                "esl job uuid=%s command=%s result=%s",
+                event.get("Job-UUID") or "-",
+                event.get("Job-Command") or "-",
+                body[:500] or "-",
+            )
         cmds = handle_event(event, ctx)
         for cmd in cmds:
             line = f"bgapi {cmd.api} {cmd.args}".strip()

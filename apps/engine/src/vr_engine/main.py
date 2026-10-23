@@ -142,16 +142,57 @@ def _cdr_payload(event: dict[str, Any], call_id: str) -> dict[str, Any]:
     return base
 
 
-def _resolve_park_entry(
+def park_decision_reason(
+    raw: str | None,
+    entry: EntryView | None,
+    number_status: str,
+    cmds: list[FsCommand],
+) -> str:
+    """Why a parked call was transferred or rejected."""
+    if entry is None:
+        if raw and ":" not in raw:
+            return "vr-entry-unparsed"
+        return "unknown-destination"
+    if number_status == "disabled":
+        return "number-disabled"
+    if any(cmd.api == "uuid_transfer" for cmd in cmds):
+        return "transfer"
+    if any(cmd.api == "uuid_kill" for cmd in cmds):
+        return "rejected"
+    return "handled"
+
+
+def _explain_park_entry(
     event: dict[str, Any], ctx: EngineCtx, dest: str
-) -> EntryView | None:
+) -> tuple[EntryView | None, str]:
+    """Resolve a parked call and say why it did or did not match an entry."""
     raw = event.get("variable_vr_entry")
     kind_ov = event.get("variable_vr_entry_kind")
     if raw:
         parsed = parse_vr_entry(raw, kind_override=kind_ov)
         if parsed is not None:
-            return parsed
-    return ctx.entries.get(dest)
+            return parsed, "vr_entry"
+        why = "vr_entry_no_colon" if ":" not in str(raw) else "vr_entry_invalid"
+    else:
+        why = "vr_entry_missing"
+    fallback = ctx.entries.get(dest) if dest else None
+    if fallback is not None:
+        return fallback, "number_entry"
+    number_state = ctx.numbers.get(dest) if dest else None
+    if number_state is None:
+        why = f"{why},number_unknown"
+    elif number_state == "disabled":
+        why = f"{why},number_disabled"
+    else:
+        why = f"{why},entry_missing"
+    return None, why
+
+
+def _resolve_park_entry(
+    event: dict[str, Any], ctx: EngineCtx, dest: str
+) -> EntryView | None:
+    entry, _reason = _explain_park_entry(event, ctx, dest)
+    return entry
 
 
 _REGED_ATTEMPTS = 3
@@ -555,7 +596,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         existing = ctx.sessions.get(call_id)
         if existing is None:
             dest = event.get("Caller-Destination-Number", "")
-            entry = _resolve_park_entry(event, ctx, dest)
+            entry, resolve_reason = _explain_park_entry(event, ctx, dest)
             if dest in ctx.numbers:
                 number_status = ctx.numbers[dest]
             elif entry is not None:
@@ -579,15 +620,26 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 and (direction == "inbound" or explicit_entry)
             ):
                 cmds = _commands_for_entry(ctx, entry, uuid, call_id)
+            raw_entry = event.get("variable_vr_entry") or ""
+            reason = park_decision_reason(raw_entry or None, entry, number_status, cmds)
             logger.info(
-                "channel park uuid=%s dest=%s direction=%s vr_entry=%s resolved=%s cmds=%s",
+                "channel park uuid=%s dest=%s direction=%s vr_entry=%s resolved=%s reason=%s detail=%s cmds=%s",
                 uuid or "-",
                 dest or "-",
                 direction or "-",
-                event.get("variable_vr_entry") or "-",
+                raw_entry or "-",
                 f"{entry.kind}:{entry.target}" if entry is not None else "-",
+                reason,
+                resolve_reason,
                 " | ".join(f"{cmd.api} {cmd.args}" for cmd in cmds) or "-",
             )
+            if reason == "vr-entry-unparsed":
+                logger.warning(
+                    "channel park rejected uuid=%s reason=vr-entry-unparsed detail=%s raw=%s",
+                    uuid or "-",
+                    resolve_reason,
+                    raw_entry,
+                )
         else:
             logger.info("channel park uuid=%s call_id=%s skipped=already-handled", uuid or "-", call_id or "-")
     elif event_name == "DTMF":

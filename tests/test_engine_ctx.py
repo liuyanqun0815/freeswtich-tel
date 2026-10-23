@@ -7,7 +7,8 @@ from sqlalchemy.pool import StaticPool
 from vr_common.db import DEFAULT_TENANT
 from vr_common.inbound import EntryView
 from vr_common.models import Base, Entry, PhoneNumber
-from vr_engine.main import EngineCtx, handle_event, load_engine_ctx
+from vr_common.commands import FsCommand
+from vr_engine.main import EngineCtx, handle_event, load_engine_ctx, park_decision_reason
 
 
 def _memory_session():
@@ -63,3 +64,24 @@ def test_park_with_variable_vr_entry_routes_when_ctx_entries_empty():
     assert "uuid_kill" not in apis
     assert apis[0] == "uuid_answer"
     assert "uuid_audio_stream" in apis
+
+
+def test_park_decision_reason_names_unparsed_entry():
+    assert (
+        park_decision_reason(
+            "extension%3A1001",
+            None,
+            "disabled",
+            [FsCommand("uuid_kill", "u1")],
+        )
+        == "vr-entry-unparsed"
+    )
+    assert (
+        park_decision_reason(
+            "extension:1001",
+            EntryView(kind="extension", target="1001"),
+            "enabled",
+            [FsCommand("uuid_transfer", "u1 bridge:user/1001@t001.vr.local inline")],
+        )
+        == "transfer"
+    )
