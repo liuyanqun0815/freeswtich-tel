@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from vr_engine.reader import EslError, connect, parse_plain_event
+from vr_engine.reader import EslError, connect, parse_plain_event, pop_complete_frames
 
 
 def _serve(handler) -> int:
@@ -84,3 +84,20 @@ def test_plain_event_decodes_vr_entry() -> None:
         "\n"
     )
     assert event["variable_vr_entry"] == "extension:1001"
+
+
+def test_event_plain_frame_keeps_channel_park() -> None:
+    body = (
+        "Event-Name: CHANNEL_PARK\n"
+        "Unique-ID: abc\n"
+        "Caller-Destination-Number: 1001\n"
+        "Caller-Direction: inbound\n"
+        "variable_vr_entry: extension%3A1001\n"
+    ).encode()
+    frame = f"Content-Type: text/event-plain\nContent-Length: {len(body)}\n\n".encode() + body
+    first, rest = pop_complete_frames(frame[:20])
+    assert first == []
+    events, rest = pop_complete_frames(rest + frame[20:])
+    assert rest == b""
+    assert events[0]["Event-Name"] == "CHANNEL_PARK"
+    assert events[0]["variable_vr_entry"] == "extension:1001"

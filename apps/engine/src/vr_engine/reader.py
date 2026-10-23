@@ -150,19 +150,67 @@ def _require_ok(raw: bytes, step: str) -> None:
     raise EslError(f"{step}失败：{detail}")
 
 
-def parse_plain_event(raw: bytes | str) -> dict[str, str]:
-    """Parse one ESL plain event body into a header dict."""
-    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-    header_text, sep, body = text.partition("\n\n")
+def _header_dict(header_text: str) -> dict[str, str]:
     headers: dict[str, str] = {}
     for line in header_text.splitlines():
+        line = line.strip("\r")
         if not line or ":" not in line:
             continue
         key, _, value = line.partition(":")
         headers[key.strip()] = unquote(value.strip())
+    return headers
+
+
+def parse_plain_event(raw: bytes | str) -> dict[str, str]:
+    """Parse one ESL plain event body into a header dict."""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+    header_text, sep, body = text.partition("\n\n")
+    headers = _header_dict(header_text)
     if sep and body.strip():
         headers["_body"] = body.strip()
     return headers
+
+
+def event_from_frame(outer: dict[str, str], body: bytes) -> dict[str, str]:
+    """Turn one ESL frame into the event ``handle_event`` reads.
+
+    ``event plain`` puts ``Event-Name`` in the body, after ``Content-Type`` and
+    ``Content-Length``. Reading only the outer headers drops ``CHANNEL_PARK``.
+    """
+    if outer.get("Content-Type") == "text/event-plain":
+        event = parse_plain_event(body)
+        event.setdefault("Content-Type", "text/event-plain")
+        return event
+    if body:
+        outer = dict(outer)
+        outer["_body"] = body.decode("utf-8", errors="replace").strip()
+    return outer
+
+
+def pop_complete_frames(buf: bytes) -> tuple[list[dict[str, str]], bytes]:
+    """Take every complete ESL frame out of ``buf`` and return the remainder."""
+    events: list[dict[str, str]] = []
+    while True:
+        sep = buf.find(b"\n\n")
+        if sep < 0:
+            break
+        outer = _header_dict(buf[:sep].decode("utf-8", errors="replace"))
+        length_raw = outer.get("Content-Length")
+        if length_raw is None:
+            events.append(event_from_frame(outer, b""))
+            buf = buf[sep + 2 :]
+            continue
+        try:
+            length = int(length_raw)
+        except ValueError:
+            length = 0
+        start = sep + 2
+        if len(buf) < start + length:
+            break
+        body = buf[start : start + length]
+        buf = buf[start + length :]
+        events.append(event_from_frame(outer, body))
+    return events, buf
 
 
 def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
@@ -174,36 +222,43 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
     for cmd in run_maintenance(ctx):
         line = f"bgapi {cmd.api} {cmd.args}".strip()
         transport.sendall((line + "\n\n").encode("utf-8"))
+    pending = b""
     while True:
         raw = transport.recv(65536)
         if not raw:
             break
-        event = parse_plain_event(raw)
-        event_name = event.get("Event-Name")
-        if not event_name:
-            reply = event.get("Reply-Text") or event.get("_body") or ""
-            content_type = event.get("Content-Type") or ""
-            reply_log = logger.error if "-ERR" in reply else logger.info
-            reply_log(
-                "esl reply content_type=%s reply=%s",
-                content_type or "-",
-                reply.replace("\n", " ")[:500] or "-",
-            )
-            continue
-        if event_name == "BACKGROUND_JOB":
-            body = (event.get("_body") or "").replace("\n", " ")
-            job_log = logger.error if "-ERR" in body else logger.info
-            job_log(
-                "esl job uuid=%s command=%s result=%s",
-                event.get("Job-UUID") or "-",
-                event.get("Job-Command") or "-",
-                body[:500] or "-",
-            )
-        cmds = handle_event(event, ctx)
-        for cmd in cmds:
-            line = f"bgapi {cmd.api} {cmd.args}".strip()
-            logger.info("esl send %s", line)
-            transport.sendall((line + "\n\n").encode("utf-8"))
+        pending += raw
+        frames, pending = pop_complete_frames(pending)
+        for event in frames:
+            _dispatch_event(ctx, transport, event)
+
+
+def _dispatch_event(ctx: EngineCtx, transport: Any, event: dict[str, str]) -> None:
+    event_name = event.get("Event-Name")
+    if not event_name:
+        reply = event.get("Reply-Text") or event.get("_body") or ""
+        content_type = event.get("Content-Type") or ""
+        reply_log = logger.error if "-ERR" in reply else logger.info
+        reply_log(
+            "esl reply content_type=%s reply=%s",
+            content_type or "-",
+            reply.replace("\n", " ")[:500] or "-",
+        )
+        return
+    if event_name == "BACKGROUND_JOB":
+        body = (event.get("_body") or "").replace("\n", " ")
+        job_log = logger.error if "-ERR" in body else logger.info
+        job_log(
+            "esl job uuid=%s command=%s result=%s",
+            event.get("Job-UUID") or "-",
+            event.get("Job-Command") or "-",
+            body[:500] or "-",
+        )
+    cmds = handle_event(event, ctx)
+    for cmd in cmds:
+        line = f"bgapi {cmd.api} {cmd.args}".strip()
+        logger.info("esl send %s", line)
+        transport.sendall((line + "\n\n").encode("utf-8"))
 
 
 def main() -> None:
