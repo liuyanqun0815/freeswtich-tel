@@ -19,7 +19,7 @@ services:
     volumes:
       - vr_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vr -d vr"]
+      test: [ "CMD-SHELL", "pg_isready -U vr -d vr" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -31,7 +31,7 @@ services:
     volumes:
       - vr_redis:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -53,7 +53,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["migrate"]
+    command: [ "migrate" ]
     env_file:
       - .env
     environment:
@@ -67,7 +67,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["api"]
+    command: [ "api" ]
     env_file:
       - .env
     environment:
@@ -87,7 +87,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["config"]
+    command: [ "config" ]
     env_file:
       - .env
     environment:
@@ -105,14 +105,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["push"]
+    command: [ "push" ]
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8083:8082"
+      - "8084:8082"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -123,7 +123,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["engine"]
+    command: [ "engine" ]
     env_file:
       - .env
     environment:
@@ -153,11 +153,11 @@ services:
 
   # 可选：机器人网关（当前入口未实现，仅 profile 启用）
   ai_gw:
-    profiles: ["robot"]
+    profiles: [ "robot" ]
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["ai_gw"]
+    command: [ "ai_gw" ]
     env_file:
       - .env
     depends_on:
