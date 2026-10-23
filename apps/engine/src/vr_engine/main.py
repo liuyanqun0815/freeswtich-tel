@@ -565,10 +565,6 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     return cmds
 
 
-# China ringback: 450 Hz, 1s on, 4s off. Early media so the browser can play it.
-_RINGBACK = "tone_stream://%(1000,4000,450)"
-
-
 def _extension_transfer(uuid: str, ext: str) -> FsCommand:
     tenant = os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
     domain = domain_for_tenant(tenant)
@@ -581,13 +577,9 @@ def _extension_transfer(uuid: str, ext: str) -> FsCommand:
 
 
 def _bridge_extension_commands(uuid: str, ext: str) -> list[FsCommand]:
-    return [
-        FsCommand("uuid_setvar", f"{uuid} ringback {_RINGBACK}"),
-        FsCommand("uuid_setvar", f"{uuid} instant_ringback true"),
-        FsCommand("uuid_setvar", f"{uuid} ignore_early_media true"),
-        FsCommand("uuid_pre_answer", uuid),
-        _extension_transfer(uuid, ext),
-    ]
+    # Do not pre-answer. A 183 before the callee answers makes the caller
+    # CANCEL the INVITE while the other browser is still sending 200 OK.
+    return [_extension_transfer(uuid, ext)]
 
 
 def _commands_for_entry(

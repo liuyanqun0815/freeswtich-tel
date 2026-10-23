@@ -206,7 +206,10 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
           if (_level !== "warn" && _level !== "error") {
             return;
           }
-          const text = String(content).split("\n")[0].slice(0, 300);
+          const raw = String(content).split("\n")[0];
+          const text = raw.includes("CANCEL was received")
+            ? "对方已取消呼叫，接听没有完成"
+            : raw.slice(0, 300);
           lastWarn.current = text;
           console.warn("[sip]", text);
           if (mine === generation.current) {
@@ -352,7 +355,16 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (!userRef.current) {
           return;
         }
-        await userRef.current.answer();
+        try {
+          await userRef.current.answer();
+        } catch (err) {
+          const text = errorText(err);
+          const message = text.includes("CANCEL") ? "对方已取消呼叫，接听没有完成" : text;
+          note(message);
+          setError(message);
+          setIncoming("");
+          setCallState("idle");
+        }
       },
       decline: async () => {
         if (!userRef.current) {
