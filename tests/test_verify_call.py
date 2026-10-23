@@ -56,7 +56,7 @@ def test_dial_enqueues_park_then_engine_transfers_and_answers():
             ctx,
         )
         assert parked[-1].api == "uuid_transfer"
-        assert "user/8002" in parked[-1].args
+        assert "sofia_contact(8002@" in parked[-1].args
         assert load_call(call_id)["state"] == "transferring"
 
         handle_event(

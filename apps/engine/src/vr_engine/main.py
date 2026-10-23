@@ -513,7 +513,12 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
 def _extension_transfer(uuid: str, ext: str) -> FsCommand:
     tenant = os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
     domain = domain_for_tenant(tenant)
-    return FsCommand("uuid_transfer", f"{uuid} bridge:user/{ext}@{domain} inline")
+    # sofia_contact uses the live registration. user/ext needs a directory
+    # dial-string and fails with MANDATORY_IE_MISSING when that cache is stale.
+    return FsCommand(
+        "uuid_transfer",
+        f"{uuid} bridge:${{sofia_contact({ext}@{domain})}} inline",
+    )
 
 
 def _commands_for_entry(
@@ -522,10 +527,7 @@ def _commands_for_entry(
     if entry.kind == "ivr":
         return _enter_ivr(ctx, entry.target, uuid, call_id)
     if entry.kind == "extension":
-        return [
-            FsCommand("uuid_answer", uuid),
-            _extension_transfer(uuid, entry.target),
-        ]
+        return [_extension_transfer(uuid, entry.target)]
     if entry.kind == "queue":
         return [
             FsCommand("uuid_answer", uuid),

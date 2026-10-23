@@ -40,6 +40,9 @@ def directory_xml(domain: str, user: str, a1: str, agent_id: str) -> str:
         '<document type="freeswitch/xml">\n'
         '  <section name="directory">\n'
         f'    <domain name="{domain_e}">\n'
+        "      <params>\n"
+        f'        <param name="dial-string" value="{dial_e}"/>\n'
+        "      </params>\n"
         f'      <user id="{user_e}">\n'
         "        <params>\n"
         f'          <param name="a1-hash" value="{a1_e}"/>\n'

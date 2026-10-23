@@ -188,9 +188,8 @@ def test_park_extension_and_queue_emit_commands():
         },
         ctx,
     )
-    assert extension[0].api == "uuid_answer"
-    assert extension[1].api == "uuid_transfer"
-    assert "user/8001" in extension[1].args
+    assert extension[0].api == "uuid_transfer"
+    assert "sofia_contact(8001@" in extension[0].args
 
     queue = handle_event(
         {
