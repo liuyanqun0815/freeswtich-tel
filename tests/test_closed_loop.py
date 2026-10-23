@@ -188,8 +188,9 @@ def test_park_extension_and_queue_emit_commands():
         },
         ctx,
     )
-    assert extension[0].api == "uuid_transfer"
-    assert "sofia_contact(8001@" in extension[0].args
+    transfer = next(cmd for cmd in extension if cmd.api == "uuid_transfer")
+    assert "sofia_contact(8001@" in transfer.args
+    assert any(cmd.api == "uuid_pre_answer" for cmd in extension)
 
     queue = handle_event(
         {

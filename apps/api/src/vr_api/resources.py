@@ -8,6 +8,7 @@ from typing import Annotated, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vr_api.auth import get_db, require_admin
@@ -68,6 +69,8 @@ class NumberIn(BaseModel):
     number: str
     label: Optional[str] = None
     enabled: bool = True
+    entry_kind: Optional[str] = None
+    entry_target: Optional[str] = None
     tenant_id: Optional[str] = None
 
 
@@ -259,12 +262,39 @@ def list_gateways(
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
     rows = db.scalars(select(Gateway).where(Gateway.tenant_id == DEFAULT_TENANT)).all()
-    return {
-        "items": [
-            _row_dict(r, "name", "profile", "register", "enabled", "published")
-            for r in rows
-        ]
-    }
+    return {"items": [_row_dict(row, *_GATEWAY_FIELDS) for row in rows]}
+
+
+_GATEWAY_FIELDS = (
+    "name",
+    "profile",
+    "register",
+    "username",
+    "realm",
+    "proxy",
+    "enabled",
+    "published",
+)
+
+
+def _gateway_name_taken(db: Session, name: str, exclude_id: int | None = None) -> bool:
+    row = db.scalars(
+        select(Gateway).where(Gateway.tenant_id == DEFAULT_TENANT, Gateway.name == name)
+    ).first()
+    return row is not None and row.id != exclude_id
+
+
+def _apply_gateway(row: Gateway, body: GatewayIn, *, keep_password: bool) -> None:
+    row.name = body.name.strip()
+    row.profile = body.profile.strip() or "external"
+    row.register = body.register_gw
+    row.username = body.username
+    row.realm = body.realm
+    row.proxy = body.proxy
+    row.enabled = body.enabled
+    if not keep_password:
+        row.password_encrypted = body.password_encrypted
+    row.published = False
 
 
 @router.post("/gateways", status_code=status.HTTP_201_CREATED)
@@ -273,16 +303,104 @@ def create_gateway_resource(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
-    data = _force_tenant(body.model_dump(by_alias=False))
-    data["register"] = data.pop("register_gw")
-    row = Gateway(**data)
+    if _gateway_name_taken(db, body.name.strip()):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="线路名称已存在")
+    row = Gateway(tenant_id=DEFAULT_TENANT, name=body.name.strip())
+    _apply_gateway(row, body, keep_password=False)
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="线路名称已存在") from None
     db.refresh(row)
-    return _row_dict(row, "name", "profile", "register", "enabled", "published")
+    return _row_dict(row, *_GATEWAY_FIELDS)
+
+
+@router.put("/gateways/{gateway_id}")
+def update_gateway_resource(
+    gateway_id: int,
+    body: GatewayIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(Gateway, gateway_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="线路不存在")
+    if _gateway_name_taken(db, body.name.strip(), exclude_id=row.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="线路名称已存在")
+    _apply_gateway(row, body, keep_password=body.password_encrypted in {None, ""})
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="线路名称已存在") from None
+    db.refresh(row)
+    return _row_dict(row, *_GATEWAY_FIELDS)
+
+
+@router.delete("/gateways/{gateway_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_gateway_resource(
+    gateway_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    row = db.get(Gateway, gateway_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="线路不存在")
+    db.delete(row)
+    db.commit()
 
 
 # ---- numbers ----
+
+
+def _number_item(row: PhoneNumber, entry: Entry | None) -> dict[str, Any]:
+    item = _row_dict(row, "number", "label", "enabled")
+    item["entry_kind"] = entry.kind if entry is not None else None
+    item["entry_target"] = entry.target if entry is not None else None
+    return item
+
+
+def _number_taken(db: Session, number: str, exclude_id: int | None = None) -> bool:
+    row = db.scalars(
+        select(PhoneNumber).where(
+            PhoneNumber.tenant_id == DEFAULT_TENANT,
+            PhoneNumber.number == number,
+        )
+    ).first()
+    return row is not None and row.id != exclude_id
+
+
+def _sync_number_entry(
+    db: Session, number: str, previous: str | None, body: NumberIn
+) -> Entry | None:
+    code = number.strip()
+    old_code = previous if previous and previous != code else code
+    entry = db.scalars(
+        select(Entry).where(Entry.tenant_id == DEFAULT_TENANT, Entry.code == old_code)
+    ).first()
+    kind = (body.entry_kind or "").strip()
+    target = (body.entry_target or "").strip()
+    if not kind or not target:
+        if entry is not None:
+            db.delete(entry)
+        return None
+    if entry is None:
+        entry = Entry(
+            tenant_id=DEFAULT_TENANT,
+            code=code,
+            kind=kind,
+            target=target,
+            enabled=body.enabled,
+        )
+        db.add(entry)
+    else:
+        entry.code = code
+        entry.kind = kind
+        entry.target = target
+        entry.enabled = body.enabled
+    return entry
 
 
 @router.get("/numbers")
@@ -293,7 +411,11 @@ def list_numbers(
     rows = db.scalars(
         select(PhoneNumber).where(PhoneNumber.tenant_id == DEFAULT_TENANT)
     ).all()
-    return {"items": [_row_dict(r, "number", "label", "enabled") for r in rows]}
+    entries = {
+        entry.code: entry
+        for entry in db.scalars(select(Entry).where(Entry.tenant_id == DEFAULT_TENANT)).all()
+    }
+    return {"items": [_number_item(row, entries.get(row.number)) for row in rows]}
 
 
 @router.post("/numbers")
@@ -302,12 +424,61 @@ def create_number(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
-    data = _force_tenant(body.model_dump())
-    row = PhoneNumber(**data)
+    number = body.number.strip()
+    if _number_taken(db, number):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="号码已存在")
+    row = PhoneNumber(
+        tenant_id=DEFAULT_TENANT,
+        number=number,
+        label=body.label,
+        enabled=body.enabled,
+    )
     db.add(row)
+    entry = _sync_number_entry(db, number, None, body)
     db.commit()
     db.refresh(row)
-    return _row_dict(row, "number", "label", "enabled")
+    return _number_item(row, entry)
+
+
+@router.put("/numbers/{number_id}")
+def update_number(
+    number_id: int,
+    body: NumberIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(PhoneNumber, number_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="号码不存在")
+    number = body.number.strip()
+    if _number_taken(db, number, exclude_id=row.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="号码已存在")
+    previous = row.number
+    row.number = number
+    row.label = body.label
+    row.enabled = body.enabled
+    entry = _sync_number_entry(db, number, previous, body)
+    db.commit()
+    db.refresh(row)
+    return _number_item(row, None if entry is None else entry)
+
+
+@router.delete("/numbers/{number_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_number(
+    number_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    row = db.get(PhoneNumber, number_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="号码不存在")
+    entry = db.scalars(
+        select(Entry).where(Entry.tenant_id == DEFAULT_TENANT, Entry.code == row.number)
+    ).first()
+    if entry is not None:
+        db.delete(entry)
+    db.delete(row)
+    db.commit()
 
 
 # ---- entries ----

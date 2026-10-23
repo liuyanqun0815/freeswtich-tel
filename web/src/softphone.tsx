@@ -56,6 +56,41 @@ function errorText(err: unknown): string {
   return "WebSocket 连接失败";
 }
 
+type ToneKind = "ring" | "ringback";
+
+function toneIsOn(kind: ToneKind, elapsed: number): boolean {
+  const cycle = elapsed % 5;
+  if (kind === "ringback") {
+    return cycle < 1;
+  }
+  return cycle < 0.4 || (cycle >= 0.6 && cycle < 1);
+}
+
+function startTone(kind: ToneKind, context: AudioContext): () => void {
+  const osc = context.createOscillator();
+  const gain = context.createGain();
+  osc.frequency.value = 450;
+  gain.gain.value = 0;
+  osc.connect(gain);
+  gain.connect(context.destination);
+  osc.start();
+  const started = context.currentTime;
+  const timer = window.setInterval(() => {
+    const on = toneIsOn(kind, context.currentTime - started);
+    gain.gain.setTargetAtTime(on ? 0.12 : 0, context.currentTime, 0.015);
+  }, 50);
+  return () => {
+    window.clearInterval(timer);
+    try {
+      osc.stop();
+    } catch {
+      // Already stopped.
+    }
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
 function callerOf(user: Web.SimpleUser): string {
   const session = (user as unknown as {
     session?: { remoteIdentity?: { uri?: { user?: string } } };
@@ -76,6 +111,31 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
   const [extension, setExtension] = useState("");
   const [incoming, setIncoming] = useState("");
   const [callState, setCallState] = useState<CallState>("idle");
+  const toneContext = useRef<AudioContext | null>(null);
+  const toneKind: ToneKind | "" = incoming ? "ring" : callState === "calling" ? "ringback" : "";
+
+  useEffect(() => {
+    const unlock = () => {
+      if (!toneContext.current) {
+        toneContext.current = new AudioContext();
+      }
+      void toneContext.current.resume();
+    };
+    window.addEventListener("pointerdown", unlock);
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
+
+  useEffect(() => {
+    if (!toneKind) {
+      return;
+    }
+    if (!toneContext.current) {
+      toneContext.current = new AudioContext();
+    }
+    const context = toneContext.current;
+    void context.resume();
+    return startTone(toneKind, context);
+  }, [toneKind]);
 
   const note = useCallback((message: string) => {
     const line = `${new Date().toLocaleTimeString()} ${message}`;

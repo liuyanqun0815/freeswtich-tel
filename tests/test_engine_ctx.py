@@ -1,12 +1,12 @@
 """Engine context load + vr_entry park handoff."""
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from vr_common.db import DEFAULT_TENANT
 from vr_common.inbound import EntryView
-from vr_common.models import Base, Entry, PhoneNumber
+from vr_common.models import Base, CallRecord, Entry, PhoneNumber
 from vr_common.commands import FsCommand
 from vr_engine.main import EngineCtx, handle_event, load_engine_ctx, park_decision_reason
 
@@ -85,3 +85,35 @@ def test_park_decision_reason_names_unparsed_entry():
         )
         == "transfer"
     )
+
+
+def test_hangup_writes_call_record():
+    db = _memory_session()
+    try:
+        ctx = EngineCtx(entries={}, numbers={}, db=db)
+        handle_event(
+            {
+                "Event-Name": "CHANNEL_HANGUP_COMPLETE",
+                "Unique-ID": "call-1",
+                "variable_vr_call_id": "call-1",
+                "variable_vr_tenant": DEFAULT_TENANT,
+                "Caller-Caller-ID-Number": "1001",
+                "Caller-Destination-Number": "1000",
+                "Caller-Direction": "inbound",
+                "Hangup-Cause": "NORMAL_CLEARING",
+                "variable_duration": "12",
+                "variable_billsec": "9",
+                "variable_start_epoch": "1792744693",
+                "variable_answer_epoch": "1792744696",
+                "variable_end_epoch": "1792744705",
+            },
+            ctx,
+        )
+        saved = db.scalars(select(CallRecord).where(CallRecord.vr_call_id == "call-1")).one()
+        assert saved.caller == "1001"
+        assert saved.callee == "1000"
+        assert saved.billsec == 9
+        assert saved.hangup_cause == "NORMAL_CLEARING"
+        assert saved.answered_at is not None
+    finally:
+        db.close()

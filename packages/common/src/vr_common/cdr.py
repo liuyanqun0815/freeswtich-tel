@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from vr_common.db import DEFAULT_TENANT
 from vr_common.models import CallRecord
 
@@ -68,6 +71,27 @@ def apply_event(row: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         result["tenant_id"] = DEFAULT_TENANT
 
     return result
+
+
+def upsert_call_record(db: Session, row: dict[str, Any]) -> None:
+    """Insert or update the CDR row the admin list reads."""
+    call_id = str(row.get("vr_call_id") or "")
+    if not call_id:
+        return
+    record = db.scalars(select(CallRecord).where(CallRecord.vr_call_id == call_id)).first()
+    if record is None:
+        record = CallRecord(
+            vr_call_id=call_id,
+            tenant_id=str(row.get("tenant_id") or DEFAULT_TENANT),
+        )
+        db.add(record)
+    for key in CALL_RECORD_FIELDS:
+        if key in {"vr_call_id", "tenant_id"}:
+            continue
+        if key not in row or row[key] is None or row[key] == "":
+            continue
+        setattr(record, key, row[key])
+    db.commit()
 
 
 def call_record_to_item(record: CallRecord) -> dict[str, Any]:

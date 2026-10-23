@@ -78,3 +78,67 @@ def test_extension_crud():
     assert removed.status_code == 204
     missing = client.delete(f"/extensions/{ext_id}", headers=headers)
     assert missing.status_code == 404
+
+
+def test_gateway_and_number_crud():
+    client = TestClient(app)
+    seed_user("admin_line", "admin-pass", "admin", must_change_password=False)
+    login = client.post(
+        "/auth/login", json={"username": "admin_line", "password": "admin-pass"}
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    created_gw = client.post(
+        "/gateways",
+        headers=headers,
+        json={"name": "trunk-a", "proxy": "sip.example.com", "username": "acct"},
+    )
+    assert created_gw.status_code == 201
+    gw_id = created_gw.json()["id"]
+    assert created_gw.json()["published"] is False
+
+    duplicate = client.post("/gateways", headers=headers, json={"name": "trunk-a"})
+    assert duplicate.status_code == 409
+
+    updated_gw = client.put(
+        f"/gateways/{gw_id}",
+        headers=headers,
+        json={"name": "trunk-b", "proxy": "sip2.example.com", "enabled": False},
+    )
+    assert updated_gw.status_code == 200
+    assert updated_gw.json()["name"] == "trunk-b"
+    assert updated_gw.json()["enabled"] is False
+
+    created_num = client.post(
+        "/numbers",
+        headers=headers,
+        json={
+            "number": "4008001234",
+            "label": "客服",
+            "entry_kind": "queue",
+            "entry_target": "sales",
+        },
+    )
+    assert created_num.status_code == 200
+    num_id = created_num.json()["id"]
+    assert created_num.json()["entry_kind"] == "queue"
+    assert created_num.json()["entry_target"] == "sales"
+
+    again = client.post("/numbers", headers=headers, json={"number": "4008001234"})
+    assert again.status_code == 409
+
+    updated_num = client.put(
+        f"/numbers/{num_id}",
+        headers=headers,
+        json={"number": "4008009999", "label": "售后", "enabled": False},
+    )
+    assert updated_num.status_code == 200
+    assert updated_num.json()["number"] == "4008009999"
+    assert updated_num.json()["entry_kind"] is None
+
+    listed = client.get("/numbers", headers=headers)
+    assert any(item["id"] == num_id for item in listed.json()["items"])
+
+    assert client.delete(f"/numbers/{num_id}", headers=headers).status_code == 204
+    assert client.delete(f"/gateways/{gw_id}", headers=headers).status_code == 204
+    assert client.delete(f"/gateways/{gw_id}", headers=headers).status_code == 404

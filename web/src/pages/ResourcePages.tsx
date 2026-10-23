@@ -434,26 +434,386 @@ export function ExtensionsPage() {
   );
 }
 
+type NumberRow = {
+  id: number;
+  number: string;
+  label: string | null;
+  enabled: boolean;
+  entry_kind: string | null;
+  entry_target: string | null;
+};
+
+type NumberForm = {
+  number: string;
+  label?: string;
+  enabled: boolean;
+  entry_kind?: string;
+  entry_target?: string;
+};
+
+type GatewayRow = {
+  id: number;
+  name: string;
+  profile: string;
+  register: boolean;
+  username: string | null;
+  realm: string | null;
+  proxy: string | null;
+  enabled: boolean;
+  published: boolean;
+};
+
+type GatewayForm = {
+  name: string;
+  proxy?: string;
+  username?: string;
+  password?: string;
+  realm?: string;
+  register: boolean;
+  enabled: boolean;
+};
+
+const ENTRY_KIND_OPTIONS = [
+  { value: "extension", label: "分机" },
+  { value: "queue", label: "技能组" },
+  { value: "ivr", label: "IVR" },
+  { value: "robot", label: "机器人" },
+  { value: "playback", label: "放音" },
+];
+
+function entryLabel(row: NumberRow): string {
+  if (!row.entry_kind || !row.entry_target) {
+    return "—";
+  }
+  const kind = ENTRY_KIND_OPTIONS.find((item) => item.value === row.entry_kind)?.label ?? row.entry_kind;
+  return `${kind} / ${row.entry_target}`;
+}
+
 export function GatewaysNumbersPage() {
-  return (
-    <PageShell
-      title="线路与号码"
-      filterItems={
-        <>
-          <Form.Item label="号码">
-            <Input placeholder="号码" />
-          </Form.Item>
-          <Form.Item label="网关">
-            <Input placeholder="网关" />
-          </Form.Item>
-        </>
+  const [numbers, setNumbers] = useState<NumberRow[]>([]);
+  const [gateways, setGateways] = useState<GatewayRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [numberOpen, setNumberOpen] = useState(false);
+  const [gatewayOpen, setGatewayOpen] = useState(false);
+  const [editingNumber, setEditingNumber] = useState<NumberRow | null>(null);
+  const [editingGateway, setEditingGateway] = useState<GatewayRow | null>(null);
+  const [numberForm] = Form.useForm<NumberForm>();
+  const [gatewayForm] = Form.useForm<GatewayForm>();
+
+  const load = useCallback(async () => {
+    if (!getToken()) {
+      setNumbers([]);
+      setGateways([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [numberResp, gatewayResp] = await Promise.all([api("/numbers"), api("/gateways")]);
+      if (numberResp.ok) {
+        const body = (await numberResp.json()) as { items: NumberRow[] };
+        setNumbers(body.items);
       }
-      columns={[
-        { title: "号码", dataIndex: "number", key: "number" },
-        { title: "入口", dataIndex: "entry", key: "entry" },
-        { title: "网关状态", dataIndex: "status", key: "status" },
-      ]}
-    />
+      if (gatewayResp.ok) {
+        const body = (await gatewayResp.json()) as { items: GatewayRow[] };
+        setGateways(body.items);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function openNumberCreate() {
+    setEditingNumber(null);
+    numberForm.setFieldsValue({ number: "", label: "", enabled: true, entry_kind: undefined, entry_target: "" });
+    setNumberOpen(true);
+  }
+
+  function openNumberEdit(row: NumberRow) {
+    setEditingNumber(row);
+    numberForm.setFieldsValue({
+      number: row.number,
+      label: row.label ?? "",
+      enabled: row.enabled,
+      entry_kind: row.entry_kind ?? undefined,
+      entry_target: row.entry_target ?? "",
+    });
+    setNumberOpen(true);
+  }
+
+  async function onNumberSubmit(values: NumberForm) {
+    const body = {
+      number: values.number.trim(),
+      label: values.label?.trim() || null,
+      enabled: values.enabled,
+      entry_kind: values.entry_kind || null,
+      entry_target: values.entry_target?.trim() || null,
+    };
+    const resp = editingNumber
+      ? await api(`/numbers/${editingNumber.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await api("/numbers", { method: "POST", body: JSON.stringify(body) });
+    if (resp.status === 409) {
+      message.error("号码已存在");
+      return;
+    }
+    if (!resp.ok) {
+      message.error(editingNumber ? "保存失败" : "新增失败");
+      return;
+    }
+    message.success(editingNumber ? "已保存" : "已新增");
+    setNumberOpen(false);
+    await load();
+  }
+
+  async function onNumberDelete(row: NumberRow) {
+    const resp = await api(`/numbers/${row.id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      message.error("删除失败");
+      return;
+    }
+    message.success("已删除");
+    await load();
+  }
+
+  function openGatewayCreate() {
+    setEditingGateway(null);
+    gatewayForm.setFieldsValue({
+      name: "",
+      proxy: "",
+      username: "",
+      password: "",
+      realm: "",
+      register: true,
+      enabled: true,
+    });
+    setGatewayOpen(true);
+  }
+
+  function openGatewayEdit(row: GatewayRow) {
+    setEditingGateway(row);
+    gatewayForm.setFieldsValue({
+      name: row.name,
+      proxy: row.proxy ?? "",
+      username: row.username ?? "",
+      password: "",
+      realm: row.realm ?? "",
+      register: row.register,
+      enabled: row.enabled,
+    });
+    setGatewayOpen(true);
+  }
+
+  async function onGatewaySubmit(values: GatewayForm) {
+    const body: Record<string, unknown> = {
+      name: values.name.trim(),
+      proxy: values.proxy?.trim() || null,
+      username: values.username?.trim() || null,
+      realm: values.realm?.trim() || null,
+      register: values.register,
+      enabled: values.enabled,
+      profile: "external",
+    };
+    if (values.password?.trim()) {
+      body.password_encrypted = values.password.trim();
+    }
+    const resp = editingGateway
+      ? await api(`/gateways/${editingGateway.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await api("/gateways", { method: "POST", body: JSON.stringify(body) });
+    if (resp.status === 409) {
+      message.error("线路名称已存在");
+      return;
+    }
+    if (!resp.ok) {
+      message.error(editingGateway ? "保存失败" : "新增失败");
+      return;
+    }
+    message.success(editingGateway ? "已保存" : "已新增");
+    setGatewayOpen(false);
+    await load();
+  }
+
+  async function onGatewayDelete(row: GatewayRow) {
+    const resp = await api(`/gateways/${row.id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      message.error("删除失败");
+      return;
+    }
+    message.success("已删除");
+    await load();
+  }
+
+  return (
+    <div>
+      <Typography.Title level={4} style={{ marginTop: 0 }}>
+        线路与号码
+      </Typography.Title>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <Typography.Title level={5} style={{ margin: 0 }}>
+          号码
+        </Typography.Title>
+        <Button type="primary" onClick={openNumberCreate}>
+          新增号码
+        </Button>
+      </div>
+      <Table<NumberRow>
+        style={{ marginTop: 12 }}
+        size="small"
+        bordered
+        rowKey="id"
+        loading={loading}
+        dataSource={numbers}
+        locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
+        pagination={{ pageSize: 8, showTotal: (total) => `共 ${total} 条` }}
+        columns={[
+          { title: "号码", dataIndex: "number", width: 160 },
+          { title: "名称", dataIndex: "label", render: (value: string | null) => value || "—" },
+          { title: "入口", render: (_: unknown, row: NumberRow) => entryLabel(row) },
+          {
+            title: "启用",
+            dataIndex: "enabled",
+            width: 90,
+            render: (value: boolean) => (value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
+          },
+          {
+            title: "操作",
+            width: 140,
+            render: (_: unknown, row: NumberRow) => (
+              <Space>
+                <Button type="link" size="small" onClick={() => openNumberEdit(row)}>
+                  编辑
+                </Button>
+                <Popconfirm title="确认删除该号码？" onConfirm={() => onNumberDelete(row)}>
+                  <Button type="link" size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]}
+      />
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 28 }}>
+        <div>
+          <Typography.Title level={5} style={{ margin: 0 }}>
+            线路
+          </Typography.Title>
+          <Typography.Text type="secondary">
+            保存后是草稿。在「配置发布」发布后，FreeSWITCH 才会使用这条线路。
+          </Typography.Text>
+        </div>
+        <Button type="primary" onClick={openGatewayCreate}>
+          新增线路
+        </Button>
+      </div>
+      <Table<GatewayRow>
+        style={{ marginTop: 12 }}
+        size="small"
+        bordered
+        rowKey="id"
+        loading={loading}
+        dataSource={gateways}
+        locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
+        pagination={{ pageSize: 8, showTotal: (total) => `共 ${total} 条` }}
+        columns={[
+          { title: "名称", dataIndex: "name", width: 140 },
+          { title: "代理", dataIndex: "proxy", render: (value: string | null) => value || "—" },
+          { title: "账号", dataIndex: "username", render: (value: string | null) => value || "—" },
+          {
+            title: "注册",
+            dataIndex: "register",
+            width: 90,
+            render: (value: boolean) => (value ? <Tag color="blue">注册</Tag> : <Tag>不注册</Tag>),
+          },
+          {
+            title: "启用",
+            dataIndex: "enabled",
+            width: 90,
+            render: (value: boolean) => (value ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
+          },
+          {
+            title: "网关状态",
+            dataIndex: "published",
+            width: 110,
+            render: (value: boolean) => (value ? <Tag color="green">已发布</Tag> : <Tag>未发布</Tag>),
+          },
+          {
+            title: "操作",
+            width: 140,
+            render: (_: unknown, row: GatewayRow) => (
+              <Space>
+                <Button type="link" size="small" onClick={() => openGatewayEdit(row)}>
+                  编辑
+                </Button>
+                <Popconfirm title="确认删除该线路？" onConfirm={() => onGatewayDelete(row)}>
+                  <Button type="link" size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]}
+      />
+      <Modal
+        title={editingNumber ? "编辑号码" : "新增号码"}
+        open={numberOpen}
+        onCancel={() => setNumberOpen(false)}
+        onOk={() => numberForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={numberForm} layout="vertical" onFinish={onNumberSubmit}>
+          <Form.Item name="number" label="号码" rules={[{ required: true, message: "请输入号码" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="label" label="名称">
+            <Input />
+          </Form.Item>
+          <Form.Item name="entry_kind" label="入口类型">
+            <Select allowClear options={ENTRY_KIND_OPTIONS} placeholder="不设置入口" />
+          </Form.Item>
+          <Form.Item name="entry_target" label="入口目标">
+            <Input placeholder="分机号、技能组或场景" />
+          </Form.Item>
+          <Form.Item name="enabled" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title={editingGateway ? "编辑线路" : "新增线路"}
+        open={gatewayOpen}
+        onCancel={() => setGatewayOpen(false)}
+        onOk={() => gatewayForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={gatewayForm} layout="vertical" onFinish={onGatewaySubmit}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入线路名称" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="proxy" label="代理">
+            <Input placeholder="运营商 SIP 地址" />
+          </Form.Item>
+          <Form.Item name="username" label="账号">
+            <Input />
+          </Form.Item>
+          <Form.Item name="password" label="密码">
+            <Input.Password placeholder={editingGateway ? "留空则不修改" : ""} />
+          </Form.Item>
+          <Form.Item name="realm" label="域">
+            <Input />
+          </Form.Item>
+          <Form.Item name="register" label="向运营商注册" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="enabled" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
   );
 }
 

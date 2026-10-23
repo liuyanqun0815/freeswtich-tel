@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vr_common.cdr import apply_event
+from vr_common.cdr import apply_event, upsert_call_record
 from vr_common.commands import FsCommand, bridge
 from vr_common.db import DEFAULT_TENANT
 from vr_common.dialer import TaskWindow, next_action
@@ -124,22 +124,77 @@ def _xadd_cdr(ctx: EngineCtx, row: dict[str, Any]) -> None:
     ctx.streams.setdefault(CDR_STREAM, []).append(dict(row))
 
 
+def _epoch(event: dict[str, Any], key: str) -> datetime | None:
+    raw = event.get(key) or ""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value > 4_000_000_000:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc)
+
+
+def _optional_int(event: dict[str, Any], key: str) -> int | None:
+    raw = event.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _cdr_payload(event: dict[str, Any], call_id: str) -> dict[str, Any]:
     name = event.get("Event-Name", "")
     base: dict[str, Any] = {"vr_call_id": call_id}
+    tenant = event.get("variable_vr_tenant")
+    if tenant:
+        base["tenant_id"] = tenant
     if name == "CHANNEL_PARK":
         base["type"] = "start"
         base["caller"] = event.get("Caller-Caller-ID-Number", "")
         base["callee"] = event.get("Caller-Destination-Number", "")
         base["direction"] = event.get("Caller-Direction", "")
+        started = _epoch(event, "variable_start_epoch")
+        if started is not None:
+            base["started_at"] = started
     elif name == "CHANNEL_ANSWER":
         base["type"] = "answer"
+        answered = _epoch(event, "variable_answer_epoch")
+        if answered is not None:
+            base["answered_at"] = answered
     elif name == "CHANNEL_HANGUP_COMPLETE":
         base["type"] = "hangup"
-        base["hangup_cause"] = event.get("Hangup-Cause", "")
+        base["caller"] = event.get("Caller-Caller-ID-Number", "")
+        base["callee"] = event.get("Caller-Destination-Number", "")
+        base["direction"] = event.get("Caller-Direction", "")
+        base["hangup_cause"] = event.get("Hangup-Cause") or event.get("variable_hangup_cause") or ""
+        for field_name, source in (
+            ("duration", "variable_duration"),
+            ("billsec", "variable_billsec"),
+        ):
+            number = _optional_int(event, source)
+            if number is not None:
+                base[field_name] = number
+        for field_name, source in (
+            ("started_at", "variable_start_epoch"),
+            ("answered_at", "variable_answer_epoch"),
+            ("ended_at", "variable_end_epoch"),
+        ):
+            instant = _epoch(event, source)
+            if instant is not None:
+                base[field_name] = instant
     else:
         base["type"] = name or "event"
     return base
+
+
+def _is_primary_cdr_leg(event: dict[str, Any]) -> bool:
+    """B-leg hangups share vr_call_id but must not replace the caller's CDR."""
+    call_id = event.get("variable_vr_call_id") or ""
+    uuid = event.get("Unique-ID") or ""
+    return not (call_id and uuid and call_id != uuid)
 
 
 def park_decision_reason(
@@ -464,7 +519,7 @@ def _ivr_follow(
         elif kind == "queue" and target:
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
         elif kind == "extension" and target:
-            cmds.append(_extension_transfer(uuid, str(target)))
+            cmds.extend(_bridge_extension_commands(uuid, str(target)))
         elif kind == "robot" and target:
             cmds.extend(
                 decide_park(
@@ -510,6 +565,10 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     return cmds
 
 
+# China ringback: 450 Hz, 1s on, 4s off. Early media so the browser can play it.
+_RINGBACK = "tone_stream://%(1000,4000,450)"
+
+
 def _extension_transfer(uuid: str, ext: str) -> FsCommand:
     tenant = os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
     domain = domain_for_tenant(tenant)
@@ -521,13 +580,23 @@ def _extension_transfer(uuid: str, ext: str) -> FsCommand:
     )
 
 
+def _bridge_extension_commands(uuid: str, ext: str) -> list[FsCommand]:
+    return [
+        FsCommand("uuid_setvar", f"{uuid} ringback {_RINGBACK}"),
+        FsCommand("uuid_setvar", f"{uuid} instant_ringback true"),
+        FsCommand("uuid_setvar", f"{uuid} ignore_early_media true"),
+        FsCommand("uuid_pre_answer", uuid),
+        _extension_transfer(uuid, ext),
+    ]
+
+
 def _commands_for_entry(
     ctx: EngineCtx, entry: EntryView, uuid: str, call_id: str
 ) -> list[FsCommand]:
     if entry.kind == "ivr":
         return _enter_ivr(ctx, entry.target, uuid, call_id)
     if entry.kind == "extension":
-        return [_extension_transfer(uuid, entry.target)]
+        return _bridge_extension_commands(uuid, entry.target)
     if entry.kind == "queue":
         return [
             FsCommand("uuid_answer", uuid),
@@ -686,20 +755,39 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
     if cmds:
         ctx.sent.extend(cmds)
 
-    if call_id and event_name not in {
-        "VR_BRIDGE",
-        "VR_CANCEL",
-        "VR_DIAL",
-        "VR_RECONCILE",
-        "VR_RELEASE_APPLY",
-        "HEARTBEAT",
-        "DTMF",
-        "CUSTOM",
-    }:
+    if (
+        call_id
+        and _is_primary_cdr_leg(event)
+        and event_name
+        not in {
+            "VR_BRIDGE",
+            "VR_CANCEL",
+            "VR_DIAL",
+            "VR_RECONCILE",
+            "VR_RELEASE_APPLY",
+            "HEARTBEAT",
+            "DTMF",
+            "CUSTOM",
+        }
+    ):
         row = ctx.cdr_rows.get(call_id, {})
         updated = apply_event(row, _cdr_payload(event, call_id))
         ctx.cdr_rows[call_id] = updated
         _xadd_cdr(ctx, updated)
+        if event_name == "CHANNEL_HANGUP_COMPLETE" and ctx.db is not None:
+            try:
+                upsert_call_record(ctx.db, updated)
+                logger.info(
+                    "cdr saved call_id=%s caller=%s callee=%s billsec=%s cause=%s",
+                    call_id,
+                    updated.get("caller") or "-",
+                    updated.get("callee") or "-",
+                    updated.get("billsec", "-"),
+                    updated.get("hangup_cause") or "-",
+                )
+            except Exception:
+                logger.exception("cdr save failed call_id=%s", call_id)
+                ctx.db.rollback()
 
     try:
         apply_verify_event(event, cmds)
