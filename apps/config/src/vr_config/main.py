@@ -131,6 +131,9 @@ def _lookup_entry_for_number(
 def _vr_entry_for_dialplan(db: Session, tenant_id: str, destination: str | None) -> str:
     if not destination:
         return "did:unknown"
+    extension = _lookup_extension(db, tenant_id, destination)
+    if extension is not None:
+        return f"extension:{extension.ext_number}"
     phone, entry = _lookup_entry_for_number(db, tenant_id, destination)
     if phone is None:
         return "did:unknown"

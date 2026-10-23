@@ -136,6 +136,18 @@ def test_dialplan_returns_unified_park_with_unknown_entry_without_db_match(clien
     assert '<action application="park"/>' in response.text
 
 
+def test_dialplan_routes_enabled_extension(client):
+    client.db.add(Extension(tenant_id="t001", ext_number="1000", enabled=True))
+    client.db.commit()
+    response = client.post(
+        "/fs/xml",
+        data={"section": "dialplan", "destination_number": "1000"},
+        auth=("fs", "secret"),
+    )
+    assert response.status_code == 200
+    assert "vr_entry=extension:1000" in response.text
+
+
 def test_dialplan_entry_from_seeded_phone_number_and_entry(client):
     client.db.add(
         PhoneNumber(tenant_id="t001", number="4008001234", enabled=True)

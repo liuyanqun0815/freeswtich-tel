@@ -50,20 +50,26 @@ def park_dialplan(tenant: str, entry: str, park_timeout: int) -> str:
     tenant_e = escape(tenant)
     entry_e = escape(entry)
     timeout_e = escape(str(park_timeout))
+    extension = (
+        "      <extension name=\"vr_unified_park\">\n"
+        "        <condition field=\"destination_number\" expression=\"^(.*)$\">\n"
+        "          <action application=\"export\" data=\"vr_call_id=${uuid}\"/>\n"
+        f"          <action application=\"export\" data=\"vr_tenant={tenant_e}\"/>\n"
+        f"          <action application=\"export\" data=\"vr_entry={entry_e}\"/>\n"
+        f"          <action application=\"export\" data=\"park_timeout={timeout_e}\"/>\n"
+        "          <action application=\"park\"/>\n"
+        "        </condition>\n"
+        "      </extension>\n"
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
         '<document type="freeswitch/xml">\n'
         '  <section name="dialplan">\n'
         '    <context name="public">\n'
-        '      <extension name="vr_unified_park">\n'
-        '        <condition field="destination_number" expression="^(.*)$">\n'
-        '          <action application="export" data="vr_call_id=${uuid}"/>\n'
-        f'          <action application="export" data="vr_tenant={tenant_e}"/>\n'
-        f'          <action application="export" data="vr_entry={entry_e}"/>\n'
-        f'          <action application="export" data="park_timeout={timeout_e}"/>\n'
-        '          <action application="park"/>\n'
-        "        </condition>\n"
-        "      </extension>\n"
+        f"{extension}"
+        "    </context>\n"
+        '    <context name="default">\n'
+        f"{extension}"
         "    </context>\n"
         "  </section>\n"
         "</document>\n"
