@@ -222,6 +222,7 @@ async def fs_xml(
         destination = _destination_number(form)
         entry = _vr_entry_for_dialplan(db, tenant_id, destination)
         body = xmlbuild.park_dialplan(tenant_id, entry, _park_timeout_seconds())
+        logger.info("dialplan destination=%s entry=%s", destination or "-", entry)
         return _xml_response(body)
 
     if section == "configuration" and key_value == "sofia.conf":

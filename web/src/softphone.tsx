@@ -200,7 +200,9 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (mine !== generation.current) {
           return;
         }
-        setIncoming(callerOf(user));
+        const caller = callerOf(user);
+        note(`收到来电 ${caller}`);
+        setIncoming(caller);
         setCallState("calling");
       },
       onCallAnswered: () => {
@@ -214,6 +216,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (mine !== generation.current) {
           return;
         }
+        note("通话结束");
         setIncoming("");
         setCallState("idle");
       },
@@ -282,6 +285,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
           throw new Error("软电话未注册");
         }
         setCallState("calling");
+        note(`呼叫 ${sipTarget(profile, number)}`);
         await user.call(sipTarget(profile, number));
       },
       answer: async () => {

@@ -18,6 +18,7 @@ from vr_common.db import DEFAULT_TENANT
 from vr_common.dialer import TaskWindow, next_action
 from vr_common.dispatch import offer
 from vr_common.esljobs import drain_commands
+from vr_common.sipcred import domain_for_tenant
 from vr_common.inbound import EntryView, decide_park
 from vr_common.ivr import step as ivr_step
 from vr_common.models import ConfigRelease, Entry, IvrPublish, PhoneNumber
@@ -422,7 +423,7 @@ def _ivr_follow(
         elif kind == "queue" and target:
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
         elif kind == "extension" and target:
-            cmds.append(FsCommand("uuid_transfer", f"{uuid} user/{target}"))
+            cmds.append(_extension_transfer(uuid, str(target)))
         elif kind == "robot" and target:
             cmds.extend(
                 decide_park(
@@ -468,6 +469,12 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     return cmds
 
 
+def _extension_transfer(uuid: str, ext: str) -> FsCommand:
+    tenant = os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
+    domain = domain_for_tenant(tenant)
+    return FsCommand("uuid_transfer", f"{uuid} bridge:user/{ext}@{domain} inline")
+
+
 def _commands_for_entry(
     ctx: EngineCtx, entry: EntryView, uuid: str, call_id: str
 ) -> list[FsCommand]:
@@ -476,7 +483,7 @@ def _commands_for_entry(
     if entry.kind == "extension":
         return [
             FsCommand("uuid_answer", uuid),
-            FsCommand("uuid_transfer", f"{uuid} user/{entry.target}"),
+            _extension_transfer(uuid, entry.target),
         ]
     if entry.kind == "queue":
         return [
@@ -572,6 +579,17 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 and (direction == "inbound" or explicit_entry)
             ):
                 cmds = _commands_for_entry(ctx, entry, uuid, call_id)
+            logger.info(
+                "channel park uuid=%s dest=%s direction=%s vr_entry=%s resolved=%s cmds=%s",
+                uuid or "-",
+                dest or "-",
+                direction or "-",
+                event.get("variable_vr_entry") or "-",
+                f"{entry.kind}:{entry.target}" if entry is not None else "-",
+                " | ".join(f"{cmd.api} {cmd.args}" for cmd in cmds) or "-",
+            )
+        else:
+            logger.info("channel park uuid=%s call_id=%s skipped=already-handled", uuid or "-", call_id or "-")
     elif event_name == "DTMF":
         cmds = _handle_dtmf(ctx, event, call_id, uuid)
     elif event_name == "HEARTBEAT":

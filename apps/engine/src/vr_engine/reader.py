@@ -183,6 +183,7 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
         cmds = handle_event(event, ctx)
         for cmd in cmds:
             line = f"bgapi {cmd.api} {cmd.args}".strip()
+            logger.info("esl send %s", line)
             transport.sendall((line + "\n\n").encode("utf-8"))
 
 
