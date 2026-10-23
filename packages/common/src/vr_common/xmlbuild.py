@@ -21,11 +21,20 @@ def not_found_xml() -> str:
     )
 
 
+# user/1000@domain reads this variable. Without it FreeSWITCH logs
+# "No dial-string available" and hangs up with MANDATORY_IE_MISSING.
+_USER_DIAL_STRING = (
+    "{^^:sip_invite_domain=${dialed_domain}:presence_id=${dialed_user}@${dialed_domain}}"
+    "${sofia_contact(*/${dialed_user}@${dialed_domain})}"
+)
+
+
 def directory_xml(domain: str, user: str, a1: str, agent_id: str) -> str:
     domain_e = escape(domain)
     user_e = escape(user)
     a1_e = escape(a1)
     agent_e = escape(agent_id)
+    dial_e = escape(_USER_DIAL_STRING)
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
         '<document type="freeswitch/xml">\n'
@@ -37,6 +46,7 @@ def directory_xml(domain: str, user: str, a1: str, agent_id: str) -> str:
         '          <param name="cacheable" value="true"/>\n'
         "        </params>\n"
         "        <variables>\n"
+        f'          <variable name="dial-string" value="{dial_e}"/>\n'
         f'          <variable name="agent_id" value="{agent_e}"/>\n'
         "        </variables>\n"
         "      </user>\n"

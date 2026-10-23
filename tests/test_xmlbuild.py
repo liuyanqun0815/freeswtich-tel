@@ -22,6 +22,8 @@ def test_directory_xml_uses_a1_hash_not_plain_password():
     assert "abc123" in xml
     assert 'name="cacheable" value="true"' in xml
     assert 'name="password"' not in xml
+    assert 'name="dial-string"' in xml
+    assert "sofia_contact(*/${dialed_user}@${dialed_domain})" in xml
 
 
 def test_gateway_xml_escapes_special_chars():
