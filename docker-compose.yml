@@ -145,8 +145,11 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP:-47.253.82.114}
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - api
       - push

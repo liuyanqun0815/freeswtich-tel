@@ -38,9 +38,9 @@ docker compose up -d --build
 | postgres / redis | 依赖 | 5432 / 6379 |
 | migrate | 一次性 `alembic upgrade head` | — |
 | api / config / push / engine | 平台进程 | 8080 / 8081 / 8084 / — |
-| web | nginx 管理台 | **80** |
+| web | nginx 管理台 | **80** / **443** |
 
-- 管理台：http://localhost/
+- 管理台：http://localhost/ ，或 `https://PUBLIC_IP/`（自签证书，浏览器点继续访问）
 - API：http://localhost:8080
 - xml_curl：http://localhost:8081/fs/xml（Basic = `XML_CURL_USER` / `XML_CURL_PASSWORD`）
 - 坐席 WS：`ws://localhost:8084/ws/agent`（经 web 反代为 `/ws/...`）
