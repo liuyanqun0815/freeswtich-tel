@@ -112,7 +112,7 @@ services:
       DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8082:8082"
+      - "8083:8082"
     depends_on:
       migrate:
         condition: service_completed_successfully
