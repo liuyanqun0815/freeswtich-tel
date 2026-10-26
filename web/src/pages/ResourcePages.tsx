@@ -817,42 +817,519 @@ export function GatewaysNumbersPage() {
   );
 }
 
-export function IvrPage() {
-  return (
-    <PageShell
-      title="IVR"
-      filterItems={
-        <Form.Item label="流程">
-          <Input placeholder="流程" />
-        </Form.Item>
+type SkillGroupRow = {
+  id: number;
+  name: string;
+  members: string[];
+  ring_timeout_seconds: number;
+  overflow_target: string | null;
+};
+
+type SkillGroupForm = {
+  name: string;
+  members: string[];
+  ring_timeout_seconds: number;
+};
+
+type ExtensionOption = { id: number; ext_number: string; display_name: string | null };
+
+type IvrKeyRow = {
+  digit: string;
+  kind: "extension" | "playback" | "hangup";
+  target?: string;
+  skill_group_id?: number;
+};
+
+type IvrFlowRow = {
+  id: number;
+  name: string;
+  version: number;
+  draft: {
+    id?: string;
+    kind?: string;
+    prompt?: string;
+    children?: Array<Record<string, unknown>>;
+  };
+};
+
+type IvrFlowForm = {
+  name: string;
+  prompt: string;
+  keys: IvrKeyRow[];
+};
+
+const IVR_ACTION_OPTIONS = [
+  { value: "extension", label: "转分机 / 转人工" },
+  { value: "playback", label: "放音" },
+  { value: "hangup", label: "挂机" },
+];
+
+function draftFromForm(values: IvrFlowForm): Record<string, unknown> {
+  return {
+    id: "root",
+    kind: "menu",
+    prompt: values.prompt.trim(),
+    children: (values.keys || []).map((key, index) => {
+      const child: Record<string, unknown> = {
+        digit: String(key.digit).trim(),
+        id: `n${index + 1}`,
+        kind: key.kind,
+      };
+      if (key.kind === "extension") {
+        child.target = key.target;
+        if (key.skill_group_id != null) {
+          child.skill_group_id = key.skill_group_id;
+        }
+      } else if (key.kind === "playback") {
+        child.target = key.target?.trim();
       }
-      columns={[
-        { title: "名称", dataIndex: "name", key: "name" },
-        { title: "版本", dataIndex: "version", key: "version" },
-      ]}
-    />
+      return child;
+    }),
+  };
+}
+
+function formFromDraft(row: IvrFlowRow): IvrFlowForm {
+  const children = Array.isArray(row.draft?.children) ? row.draft.children : [];
+  return {
+    name: row.name,
+    prompt: String(row.draft?.prompt || ""),
+    keys: children.map((child) => {
+      const kind = String(child.kind || "hangup") as IvrKeyRow["kind"];
+      return {
+        digit: String(child.digit || ""),
+        kind: kind === "extension" || kind === "playback" || kind === "hangup" ? kind : "hangup",
+        target: child.target != null ? String(child.target) : undefined,
+        skill_group_id:
+          child.skill_group_id != null && child.skill_group_id !== ""
+            ? Number(child.skill_group_id)
+            : undefined,
+      };
+    }),
+  };
+}
+
+export function IvrPage() {
+  const [items, setItems] = useState<IvrFlowRow[]>([]);
+  const [extensions, setExtensions] = useState<ExtensionOption[]>([]);
+  const [skillGroups, setSkillGroups] = useState<SkillGroupRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<IvrFlowRow | null>(null);
+  const [form] = Form.useForm<IvrFlowForm>();
+
+  const load = useCallback(async () => {
+    if (!getToken()) {
+      setItems([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [ivrResp, extResp, sgResp] = await Promise.all([
+        api("/ivr"),
+        api("/extensions"),
+        api("/skill-groups"),
+      ]);
+      if (ivrResp.ok) {
+        const body = (await ivrResp.json()) as { items: IvrFlowRow[] };
+        setItems(body.items ?? []);
+      }
+      if (extResp.ok) {
+        const body = (await extResp.json()) as { items: ExtensionOption[] };
+        setExtensions(body.items ?? []);
+      }
+      if (sgResp.ok) {
+        const body = (await sgResp.json()) as { items: SkillGroupRow[] };
+        setSkillGroups(body.items ?? []);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function openCreate() {
+    setEditing(null);
+    form.setFieldsValue({
+      name: "",
+      prompt: "ivr/welcome.wav",
+      keys: [{ digit: "0", kind: "extension", target: undefined, skill_group_id: undefined }],
+    });
+    setOpen(true);
+  }
+
+  function openEdit(row: IvrFlowRow) {
+    setEditing(row);
+    form.setFieldsValue(formFromDraft(row));
+    setOpen(true);
+  }
+
+  async function onSubmit(values: IvrFlowForm) {
+    const body = { name: values.name.trim(), draft: draftFromForm(values) };
+    const resp = editing
+      ? await api(`/ivr/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await api("/ivr", { method: "POST", body: JSON.stringify(body) });
+    if (!resp.ok) {
+      message.error(editing ? "保存失败" : "新增失败");
+      return;
+    }
+    message.success(editing ? "已保存草稿" : "已新增");
+    setOpen(false);
+    await load();
+  }
+
+  async function onPublish(row: IvrFlowRow) {
+    const resp = await api(`/ivr/${row.id}/publish`, { method: "POST" });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => null);
+      message.error(
+        Array.isArray(detail?.detail) ? `发布失败：${detail.detail.join(",")}` : "发布失败",
+      );
+      return;
+    }
+    const body = (await resp.json()) as { version: number };
+    message.success(`已发布 v${body.version}`);
+    await load();
+  }
+
+  async function onDelete(row: IvrFlowRow) {
+    const resp = await api(`/ivr/${row.id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      message.error("删除失败");
+      return;
+    }
+    message.success("已删除");
+    await load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <Typography.Title level={4} style={{ marginTop: 0 }}>
+          IVR
+        </Typography.Title>
+        <Button type="primary" onClick={openCreate}>
+          新增流程
+        </Button>
+      </div>
+      <Typography.Text type="secondary">
+        保存为草稿后需点「发布」。号码入口选 IVR 时，目标填流程 ID。按键转分机可下拉选分机，离线时进该按键的兜底技能组。
+      </Typography.Text>
+      <Table<IvrFlowRow>
+        style={{ marginTop: 12 }}
+        size="small"
+        bordered
+        rowKey="id"
+        loading={loading}
+        dataSource={items}
+        locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
+        pagination={false}
+        columns={[
+          { title: "ID", dataIndex: "id", width: 80 },
+          { title: "名称", dataIndex: "name" },
+          {
+            title: "已发布版本",
+            dataIndex: "version",
+            width: 120,
+            render: (value: number) => (value > 0 ? `v${value}` : "未发布"),
+          },
+          {
+            title: "按键数",
+            width: 90,
+            render: (_: unknown, row: IvrFlowRow) =>
+              Array.isArray(row.draft?.children) ? row.draft.children.length : 0,
+          },
+          {
+            title: "操作",
+            width: 220,
+            render: (_: unknown, row: IvrFlowRow) => (
+              <Space>
+                <Button type="link" size="small" onClick={() => openEdit(row)}>
+                  编辑
+                </Button>
+                <Button type="link" size="small" onClick={() => void onPublish(row)}>
+                  发布
+                </Button>
+                <Popconfirm title="确认删除该 IVR？" onConfirm={() => onDelete(row)}>
+                  <Button type="link" size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]}
+      />
+      <Modal
+        title={editing ? "编辑 IVR" : "新增 IVR"}
+        open={open}
+        onCancel={() => setOpen(false)}
+        onOk={() => form.submit()}
+        width={720}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical" onFinish={(values) => void onSubmit(values)}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+            <Input placeholder="主菜单" />
+          </Form.Item>
+          <Form.Item name="prompt" label="欢迎音" rules={[{ required: true, message: "请输入欢迎音" }]}>
+            <Input placeholder="ivr/welcome.wav" />
+          </Form.Item>
+          <Form.List name="keys">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map((field) => (
+                  <Space key={field.key} align="start" style={{ display: "flex", marginBottom: 8 }} wrap>
+                    <Form.Item
+                      {...field}
+                      name={[field.name, "digit"]}
+                      label="按键"
+                      rules={[{ required: true, message: "按键" }]}
+                    >
+                      <Input style={{ width: 64 }} placeholder="0" maxLength={1} />
+                    </Form.Item>
+                    <Form.Item
+                      {...field}
+                      name={[field.name, "kind"]}
+                      label="动作"
+                      rules={[{ required: true, message: "动作" }]}
+                    >
+                      <Select style={{ width: 150 }} options={IVR_ACTION_OPTIONS} />
+                    </Form.Item>
+                    <Form.Item noStyle shouldUpdate>
+                      {() => {
+                        const kind = form.getFieldValue(["keys", field.name, "kind"]) as IvrKeyRow["kind"];
+                        if (kind === "extension") {
+                          return (
+                            <>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, "target"]}
+                                label="分机"
+                                rules={[{ required: true, message: "选择分机" }]}
+                              >
+                                <Select
+                                  style={{ width: 140 }}
+                                  placeholder="分机"
+                                  options={extensions.map((ext) => ({
+                                    value: ext.ext_number,
+                                    label: ext.display_name
+                                      ? `${ext.ext_number} ${ext.display_name}`
+                                      : ext.ext_number,
+                                  }))}
+                                />
+                              </Form.Item>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, "skill_group_id"]}
+                                label="兜底技能组"
+                                rules={[{ required: true, message: "选择技能组" }]}
+                              >
+                                <Select
+                                  style={{ width: 160 }}
+                                  placeholder="技能组"
+                                  options={skillGroups.map((sg) => ({
+                                    value: sg.id,
+                                    label: sg.name,
+                                  }))}
+                                />
+                              </Form.Item>
+                            </>
+                          );
+                        }
+                        if (kind === "playback") {
+                          return (
+                            <Form.Item
+                              {...field}
+                              name={[field.name, "target"]}
+                              label="放音文件"
+                              rules={[{ required: true, message: "放音路径" }]}
+                            >
+                              <Input style={{ width: 200 }} placeholder="ivr/info.wav" />
+                            </Form.Item>
+                          );
+                        }
+                        return null;
+                      }}
+                    </Form.Item>
+                    <Button type="link" danger onClick={() => remove(field.name)} style={{ marginTop: 30 }}>
+                      删除
+                    </Button>
+                  </Space>
+                ))}
+                <Button
+                  type="dashed"
+                  onClick={() =>
+                    add({ digit: "", kind: "extension", target: undefined, skill_group_id: undefined })
+                  }
+                  block
+                >
+                  添加按键
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form>
+      </Modal>
+    </div>
   );
 }
 
 export function SkillGroupsPage() {
-  return (
-    <PageShell
-      title="技能组"
-      filterItems={
-        <Form.Item label="名称">
-          <Input placeholder="名称" />
-        </Form.Item>
+  const [items, setItems] = useState<SkillGroupRow[]>([]);
+  const [extensions, setExtensions] = useState<ExtensionOption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<SkillGroupRow | null>(null);
+  const [form] = Form.useForm<SkillGroupForm>();
+
+  const load = useCallback(async () => {
+    if (!getToken()) {
+      setItems([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [sgResp, extResp] = await Promise.all([api("/skill-groups"), api("/extensions")]);
+      if (sgResp.ok) {
+        const body = (await sgResp.json()) as { items: SkillGroupRow[] };
+        setItems(body.items ?? []);
       }
-      columns={[
-        { title: "名称", dataIndex: "name", key: "name" },
-        { title: "溢出目标", dataIndex: "overflow_target", key: "overflow_target" },
-        {
-          title: "振铃超时",
-          dataIndex: "ring_timeout_seconds",
-          key: "ring_timeout_seconds",
-        },
-      ]}
-    />
+      if (extResp.ok) {
+        const body = (await extResp.json()) as { items: ExtensionOption[] };
+        setExtensions(body.items ?? []);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function openCreate() {
+    setEditing(null);
+    form.setFieldsValue({ name: "", members: [], ring_timeout_seconds: 20 });
+    setOpen(true);
+  }
+
+  function openEdit(row: SkillGroupRow) {
+    setEditing(row);
+    form.setFieldsValue({
+      name: row.name,
+      members: row.members ?? [],
+      ring_timeout_seconds: row.ring_timeout_seconds,
+    });
+    setOpen(true);
+  }
+
+  async function onSubmit(values: SkillGroupForm) {
+    const body = {
+      name: values.name.trim(),
+      members: values.members ?? [],
+      ring_timeout_seconds: Number(values.ring_timeout_seconds) || 20,
+    };
+    const resp = editing
+      ? await api(`/skill-groups/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await api("/skill-groups", { method: "POST", body: JSON.stringify(body) });
+    if (!resp.ok) {
+      message.error(editing ? "保存失败" : "新增失败");
+      return;
+    }
+    message.success(editing ? "已保存" : "已新增");
+    setOpen(false);
+    await load();
+  }
+
+  async function onDelete(row: SkillGroupRow) {
+    const resp = await api(`/skill-groups/${row.id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      message.error("删除失败");
+      return;
+    }
+    message.success("已删除");
+    await load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <Typography.Title level={4} style={{ marginTop: 0 }}>
+          技能组
+        </Typography.Title>
+        <Button type="primary" onClick={openCreate}>
+          新增技能组
+        </Button>
+      </div>
+      <Table<SkillGroupRow>
+        style={{ marginTop: 12 }}
+        size="small"
+        bordered
+        rowKey="id"
+        loading={loading}
+        dataSource={items}
+        locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
+        pagination={false}
+        columns={[
+          { title: "名称", dataIndex: "name" },
+          {
+            title: "成员分机",
+            dataIndex: "members",
+            render: (members: string[]) => (members?.length ? members.join(", ") : "—"),
+          },
+          { title: "振铃超时(秒)", dataIndex: "ring_timeout_seconds", width: 120 },
+          {
+            title: "操作",
+            width: 140,
+            render: (_: unknown, row: SkillGroupRow) => (
+              <Space>
+                <Button type="link" size="small" onClick={() => openEdit(row)}>
+                  编辑
+                </Button>
+                <Popconfirm title="确认删除该技能组？" onConfirm={() => onDelete(row)}>
+                  <Button type="link" size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]}
+      />
+      <Modal
+        title={editing ? "编辑技能组" : "新增技能组"}
+        open={open}
+        onCancel={() => setOpen(false)}
+        onOk={() => form.submit()}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical" onFinish={(values) => void onSubmit(values)}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+            <Input placeholder="销售组" />
+          </Form.Item>
+          <Form.Item name="members" label="成员分机" rules={[{ required: true, message: "请选择分机" }]}>
+            <Select
+              mode="multiple"
+              placeholder="选择分机"
+              options={extensions.map((ext) => ({
+                value: ext.ext_number,
+                label: ext.display_name ? `${ext.ext_number} ${ext.display_name}` : ext.ext_number,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="ring_timeout_seconds"
+            label="振铃超时(秒)"
+            rules={[{ required: true, message: "请输入超时" }]}
+          >
+            <Input type="number" min={5} />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
   );
 }
 

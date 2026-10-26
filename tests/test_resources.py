@@ -142,3 +142,83 @@ def test_gateway_and_number_crud():
     assert client.delete(f"/numbers/{num_id}", headers=headers).status_code == 204
     assert client.delete(f"/gateways/{gw_id}", headers=headers).status_code == 204
     assert client.delete(f"/gateways/{gw_id}", headers=headers).status_code == 404
+
+
+def test_skill_group_crud_with_members():
+    client = TestClient(app)
+    seed_user("admin_sg", "admin-pass", "admin", must_change_password=False)
+    login = client.post("/auth/login", json={"username": "admin_sg", "password": "admin-pass"})
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    created = client.post(
+        "/skill-groups",
+        headers=headers,
+        json={"name": "销售", "members": ["1000", "1001"], "ring_timeout_seconds": 25},
+    )
+    assert created.status_code == 201
+    sg_id = created.json()["id"]
+    assert created.json()["members"] == ["1000", "1001"]
+
+    updated = client.put(
+        f"/skill-groups/{sg_id}",
+        headers=headers,
+        json={"name": "售后", "members": ["1001"], "ring_timeout_seconds": 30},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "售后"
+    assert updated.json()["members"] == ["1001"]
+
+    listed = client.get("/skill-groups", headers=headers)
+    assert any(item["id"] == sg_id and item["members"] == ["1001"] for item in listed.json()["items"])
+
+    assert client.delete(f"/skill-groups/{sg_id}", headers=headers).status_code == 204
+    assert client.delete(f"/skill-groups/{sg_id}", headers=headers).status_code == 404
+
+
+def test_ivr_flow_crud_and_publish():
+    client = TestClient(app)
+    seed_user("admin_ivr2", "admin-pass", "admin", must_change_password=False)
+    login = client.post(
+        "/auth/login", json={"username": "admin_ivr2", "password": "admin-pass"}
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    draft = {
+        "id": "root",
+        "kind": "menu",
+        "prompt": "ivr/welcome.wav",
+        "children": [
+            {
+                "digit": "0",
+                "id": "to_agent",
+                "kind": "extension",
+                "target": "1000",
+                "skill_group_id": 1,
+            },
+            {"digit": "1", "id": "info", "kind": "playback", "target": "ivr/info.wav"},
+        ],
+    }
+    created = client.post("/ivr", headers=headers, json={"name": "主菜单", "draft": draft})
+    assert created.status_code == 201
+    flow_id = created.json()["id"]
+    assert created.json()["draft"]["children"][0]["target"] == "1000"
+
+    updated = client.put(
+        f"/ivr/{flow_id}",
+        headers=headers,
+        json={"name": "昼夜菜单", "draft": draft},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "昼夜菜单"
+
+    published = client.post(f"/ivr/{flow_id}/publish", headers=headers)
+    assert published.status_code == 200
+    assert published.json()["version"] == 1
+
+    listed = client.get("/ivr", headers=headers)
+    assert listed.status_code == 200
+    item = next(row for row in listed.json()["items"] if row["id"] == flow_id)
+    assert item["name"] == "昼夜菜单"
+    assert item["version"] == 1
+
+    assert client.delete(f"/ivr/{flow_id}", headers=headers).status_code == 204

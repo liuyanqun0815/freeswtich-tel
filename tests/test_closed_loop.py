@@ -128,6 +128,94 @@ def test_gateway_release_stays_pending_until_reged():
         db.close()
 
 
+def test_ivr_dtmf_extension_falls_back_to_skill_group_when_offline():
+    from vr_common.registration import MemoryRegStore, mark_registered, set_reg_store
+
+    set_reg_store(MemoryRegStore())
+    mark_registered("1001")
+    snapshot = {
+        "id": "root",
+        "kind": "menu",
+        "prompt": "ivr/welcome.wav",
+        "children": [
+            {
+                "digit": "0",
+                "id": "agent",
+                "kind": "extension",
+                "target": "1000",
+                "skill_group_id": 7,
+            },
+            {"digit": "1", "id": "play", "kind": "playback", "target": "ivr/info.wav"},
+        ],
+    }
+    ctx = EngineCtx(
+        entries={},
+        numbers={"400": "enabled"},
+        ivr_snapshots={"3": (1, snapshot)},
+        skill_groups={"7": ["1002", "1001"]},
+    )
+    handle_event(
+        {
+            "Event-Name": "CHANNEL_PARK",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c-ivr",
+            "Caller-Direction": "inbound",
+            "Caller-Destination-Number": "400",
+            "variable_vr_entry": "ivr:3",
+        },
+        ctx,
+    )
+    transfer = handle_event(
+        {
+            "Event-Name": "DTMF",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c-ivr",
+            "DTMF-Digit": "0",
+        },
+        ctx,
+    )
+    cmd = next(c for c in transfer if c.api == "uuid_transfer")
+    assert "sofia_contact(1001@" in cmd.args
+
+
+def test_ivr_dtmf_playback_stays_on_menu():
+    snapshot = {
+        "id": "root",
+        "kind": "menu",
+        "prompt": "ivr/welcome.wav",
+        "children": [
+            {"digit": "1", "id": "play", "kind": "playback", "target": "ivr/info.wav"},
+        ],
+    }
+    ctx = EngineCtx(
+        entries={},
+        numbers={"400": "enabled"},
+        ivr_snapshots={"3": (1, snapshot)},
+    )
+    handle_event(
+        {
+            "Event-Name": "CHANNEL_PARK",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c-play",
+            "Caller-Direction": "inbound",
+            "Caller-Destination-Number": "400",
+            "variable_vr_entry": "ivr:3",
+        },
+        ctx,
+    )
+    play = handle_event(
+        {
+            "Event-Name": "DTMF",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c-play",
+            "DTMF-Digit": "1",
+        },
+        ctx,
+    )
+    assert any(c.api == "uuid_broadcast" and "ivr/info.wav" in c.args for c in play)
+    assert ctx.sessions["c-play"].state == "ivr:root"
+
+
 def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
     snapshot = {
         "id": "root",

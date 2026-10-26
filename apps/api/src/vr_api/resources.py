@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,8 @@ from vr_common.models import (
     Extension,
     FsNode,
     Gateway,
+    IvrFlow,
+    IvrPublish,
     PhoneNumber,
     SkillGroup,
     User,
@@ -87,7 +90,14 @@ class SkillGroupIn(BaseModel):
     name: str
     overflow_target: Optional[str] = None
     ring_timeout_seconds: int = 20
-    members_json: str = "[]"
+    members: list[str] = Field(default_factory=list)
+    members_json: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class IvrFlowIn(BaseModel):
+    name: str
+    draft: dict[str, Any] = Field(default_factory=dict)
     tenant_id: Optional[str] = None
 
 
@@ -515,6 +525,32 @@ def create_entry(
 # ---- skill groups ----
 
 
+def _parse_members(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def _members_json_from_body(body: SkillGroupIn) -> str:
+    if body.members:
+        return json.dumps([m.strip() for m in body.members if m.strip()], ensure_ascii=False)
+    if body.members_json:
+        return json.dumps(_parse_members(body.members_json), ensure_ascii=False)
+    return "[]"
+
+
+def _skill_group_out(row: SkillGroup) -> dict[str, Any]:
+    item = _row_dict(row, "name", "overflow_target", "ring_timeout_seconds", "members_json")
+    item["members"] = _parse_members(row.members_json)
+    return item
+
+
 @router.get("/skill-groups")
 def list_skill_groups(
     db: Annotated[Session, Depends(get_db)],
@@ -523,30 +559,147 @@ def list_skill_groups(
     rows = db.scalars(
         select(SkillGroup).where(SkillGroup.tenant_id == DEFAULT_TENANT)
     ).all()
-    return {
-        "items": [
-            _row_dict(
-                r, "name", "overflow_target", "ring_timeout_seconds", "members_json"
-            )
-            for r in rows
-        ]
-    }
+    return {"items": [_skill_group_out(r) for r in rows]}
 
 
-@router.post("/skill-groups")
+@router.post("/skill-groups", status_code=status.HTTP_201_CREATED)
 def create_skill_group(
     body: SkillGroupIn,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
-    data = _force_tenant(body.model_dump())
-    row = SkillGroup(**data)
+    row = SkillGroup(
+        name=body.name.strip(),
+        overflow_target=body.overflow_target,
+        ring_timeout_seconds=body.ring_timeout_seconds,
+        members_json=_members_json_from_body(body),
+        tenant_id=DEFAULT_TENANT,
+    )
     db.add(row)
     db.commit()
     db.refresh(row)
-    return _row_dict(
-        row, "name", "overflow_target", "ring_timeout_seconds", "members_json"
+    return _skill_group_out(row)
+
+
+@router.put("/skill-groups/{skill_group_id}")
+def update_skill_group(
+    skill_group_id: int,
+    body: SkillGroupIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(SkillGroup, skill_group_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="技能组不存在")
+    row.name = body.name.strip()
+    row.overflow_target = body.overflow_target
+    row.ring_timeout_seconds = body.ring_timeout_seconds
+    row.members_json = _members_json_from_body(body)
+    db.commit()
+    db.refresh(row)
+    return _skill_group_out(row)
+
+
+@router.delete("/skill-groups/{skill_group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_skill_group(
+    skill_group_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    row = db.get(SkillGroup, skill_group_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="技能组不存在")
+    db.delete(row)
+    db.commit()
+
+
+# ---- IVR flows ----
+
+
+def _ivr_latest_version(db: Session, flow_id: int) -> int:
+    return int(
+        db.scalar(
+            select(func.max(IvrPublish.version)).where(
+                IvrPublish.flow_id == flow_id,
+                IvrPublish.tenant_id == DEFAULT_TENANT,
+            )
+        )
+        or 0
     )
+
+
+def _ivr_out(db: Session, row: IvrFlow) -> dict[str, Any]:
+    try:
+        draft = json.loads(row.draft_json or "{}")
+    except json.JSONDecodeError:
+        draft = {}
+    if not isinstance(draft, dict):
+        draft = {}
+    return {
+        "id": row.id,
+        "name": row.name,
+        "draft": draft,
+        "version": _ivr_latest_version(db, row.id),
+        "tenant_id": row.tenant_id,
+    }
+
+
+@router.get("/ivr")
+def list_ivr_flows(
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    rows = db.scalars(select(IvrFlow).where(IvrFlow.tenant_id == DEFAULT_TENANT)).all()
+    return {"items": [_ivr_out(db, row) for row in rows]}
+
+
+@router.post("/ivr", status_code=status.HTTP_201_CREATED)
+def create_ivr_flow(
+    body: IvrFlowIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = IvrFlow(
+        name=body.name.strip(),
+        draft_json=json.dumps(body.draft or {}, ensure_ascii=False),
+        tenant_id=DEFAULT_TENANT,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _ivr_out(db, row)
+
+
+@router.put("/ivr/{flow_id}")
+def update_ivr_flow(
+    flow_id: int,
+    body: IvrFlowIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = db.get(IvrFlow, flow_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IVR not found")
+    row.name = body.name.strip()
+    row.draft_json = json.dumps(body.draft or {}, ensure_ascii=False)
+    db.commit()
+    db.refresh(row)
+    return _ivr_out(db, row)
+
+
+@router.delete("/ivr/{flow_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_ivr_flow(
+    flow_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    row = db.get(IvrFlow, flow_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IVR not found")
+    for pub in db.scalars(select(IvrPublish).where(IvrPublish.flow_id == flow_id)).all():
+        db.delete(pub)
+    db.delete(row)
+    db.commit()
 
 
 # ---- dial tasks ----

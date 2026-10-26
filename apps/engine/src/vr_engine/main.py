@@ -21,11 +21,13 @@ from vr_common.esljobs import drain_commands
 from vr_common.sipcred import domain_for_tenant
 from vr_common.inbound import EntryView, decide_park
 from vr_common.ivr import step as ivr_step
-from vr_common.models import ConfigRelease, Entry, IvrPublish, PhoneNumber
+from vr_common.ivr_route import pick_bridge_extension
+from vr_common.models import ConfigRelease, Entry, IvrPublish, PhoneNumber, SkillGroup
 from vr_common.protocol import commands_for_cancel
 from vr_common.reconcile import kill_for_missing_in_redis, reconcile
 from vr_common.registration import (
     extension_from_register_event,
+    is_registered,
     mark_registered,
     mark_unregistered,
     parse_sofia_registrations,
@@ -59,6 +61,7 @@ class EngineCtx:
     db: Session | None = None
     ivr_snapshots: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     ivr_buffers: dict[str, str] = field(default_factory=dict)
+    skill_groups: dict[str, list[str]] = field(default_factory=dict)
 
 
 def load_engine_ctx(
@@ -496,7 +499,41 @@ def _node_prompt(snapshot: dict[str, Any], node_id: str) -> str:
     return str(prompt) if prompt else ""
 
 
+def _skill_group_members(ctx: EngineCtx, skill_group_id: Any) -> list[str]:
+    key = str(skill_group_id or "").strip()
+    if not key:
+        return []
+    cached = ctx.skill_groups.get(key)
+    if cached is not None:
+        return list(cached)
+    if ctx.db is None or not key.isdigit():
+        return []
+    row = ctx.db.get(SkillGroup, int(key))
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        return []
+    try:
+        data = json.loads(row.members_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    members = [str(item).strip() for item in data if str(item).strip()]
+    ctx.skill_groups[key] = members
+    return members
+
+
+def _bridge_extension_or_queue(
+    ctx: EngineCtx, uuid: str, preferred: str, skill_group_id: Any
+) -> list[FsCommand]:
+    members = _skill_group_members(ctx, skill_group_id)
+    chosen = pick_bridge_extension(preferred, members, registered=is_registered)
+    if chosen is None:
+        return decide_park(None, "inbound", None, "disabled", uuid, "")
+    return _bridge_extension_commands(uuid, chosen)
+
+
 def _ivr_follow(
+    ctx: EngineCtx,
     uuid: str,
     call_id: str,
     snapshot: dict[str, Any],
@@ -516,10 +553,17 @@ def _ivr_follow(
         target = result.get("target")
         if kind == "hangup":
             cmds.append(FsCommand("uuid_kill", uuid))
+        elif kind == "playback" and target:
+            cmds.append(FsCommand("uuid_broadcast", f"{uuid} {target} aleg"))
+            return node_id, cmds
         elif kind == "queue" and target:
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
         elif kind == "extension" and target:
-            cmds.extend(_bridge_extension_commands(uuid, str(target)))
+            cmds.extend(
+                _bridge_extension_or_queue(
+                    ctx, uuid, str(target), result.get("skill_group_id")
+                )
+            )
         elif kind == "robot" and target:
             cmds.extend(
                 decide_park(
@@ -620,7 +664,7 @@ def _handle_dtmf(ctx: EngineCtx, event: dict[str, Any], call_id: str, uuid: str)
         return []
     if result.get("action") == "complete":
         ctx.ivr_buffers.pop(call_id, None)
-    next_node, cmds = _ivr_follow(uuid, call_id, snapshot, result, node_id)
+    next_node, cmds = _ivr_follow(ctx, uuid, call_id, snapshot, result, node_id)
     ctx.sessions[call_id] = CallSession(
         call_id=session.call_id,
         fs_node=session.fs_node,
