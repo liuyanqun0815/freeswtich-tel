@@ -219,7 +219,14 @@ def list_cdr(
     if end_at is not None:
         stmt = stmt.where(CallRecord.started_at <= end_at)
 
-    records = list(db.scalars(stmt.order_by(CallRecord.started_at.desc())).all())
+    records = list(
+        db.scalars(
+            stmt.order_by(
+                CallRecord.started_at.desc().nulls_last(),
+                CallRecord.id.desc(),
+            )
+        ).all()
+    )
     return {
         "items": [call_record_to_item(r) for r in records],
         "summary": build_cdr_summary(records),

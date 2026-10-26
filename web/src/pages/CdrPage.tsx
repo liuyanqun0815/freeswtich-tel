@@ -3,6 +3,8 @@ import {
   Descriptions,
   Form,
   Input,
+  Modal,
+  Popconfirm,
   Select,
   Space,
   Table,
@@ -32,8 +34,23 @@ export type CdrItem = {
   caller: string;
   callee: string;
   direction: string;
+  started_at?: string;
+  answered_at?: string;
+  ended_at?: string;
   hangup_cause: string;
 };
+
+function formatCdrTime(value?: string): string {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
 type CdrQuery = {
   call_id?: string;
@@ -96,6 +113,7 @@ export function CdrPage({
   const [summary, setSummary] = useState<CdrSummary>(summaryProp ?? EMPTY_SUMMARY);
   const [items, setItems] = useState<CdrItem[]>(itemsProp ?? []);
   const [loading, setLoading] = useState(false);
+  const [detail, setDetail] = useState<CdrItem | null>(null);
   const [form] = Form.useForm<CdrQuery>();
 
   const load = useCallback(async (values: CdrQuery) => {
@@ -132,11 +150,70 @@ export function CdrPage({
     void load({});
   }, [itemsProp, load]);
 
+  async function onPlayRecording(row: CdrItem) {
+    const resp = await api(`/cdr/${encodeURIComponent(row.vr_call_id)}/recording`);
+    if (resp.status === 404) {
+      message.warning("该通话没有录音");
+      return;
+    }
+    if (!resp.ok) {
+      message.error("获取录音失败");
+      return;
+    }
+    const body = (await resp.json()) as { path?: string };
+    message.info(body.path ? `录音地址：${body.path}` : "暂无可用录音地址");
+  }
+
+  async function onAddBlacklist(row: CdrItem) {
+    const phone = (row.caller || row.callee || "").trim();
+    if (!phone) {
+      message.error("该话单没有可用号码");
+      return;
+    }
+    const resp = await api("/blacklist", {
+      method: "POST",
+      body: JSON.stringify({
+        phone,
+        reason: `话单 ${row.vr_call_id}`,
+      }),
+    });
+    if (resp.status === 403) {
+      message.error("需要管理员权限才能加入黑名单");
+      return;
+    }
+    if (!resp.ok) {
+      message.error("加入黑名单失败");
+      return;
+    }
+    message.success(`已将 ${phone} 加入黑名单`);
+  }
+
   const columns: ColumnsType<CdrItem> = [
-    { title: "通话 ID", dataIndex: "vr_call_id", key: "vr_call_id" },
+    { title: "通话 ID", dataIndex: "vr_call_id", key: "vr_call_id", ellipsis: true },
     { title: "主叫", dataIndex: "caller", key: "caller" },
     { title: "被叫", dataIndex: "callee", key: "callee" },
     { title: "方向", dataIndex: "direction", key: "direction" },
+    {
+      title: "开始时间",
+      dataIndex: "started_at",
+      key: "started_at",
+      width: 170,
+      render: (value: string | undefined) => formatCdrTime(value),
+    },
+    {
+      title: "接通时间",
+      dataIndex: "answered_at",
+      key: "answered_at",
+      width: 170,
+      render: (value: string | undefined) => formatCdrTime(value),
+    },
+    {
+      title: "结束时间",
+      dataIndex: "ended_at",
+      key: "ended_at",
+      width: 170,
+      render: (value: string | undefined) => formatCdrTime(value),
+    },
     {
       title: "通话时长",
       dataIndex: "billsec",
@@ -153,17 +230,24 @@ export function CdrPage({
     {
       title: "操作",
       key: "actions",
-      render: () => (
+      fixed: "right",
+      width: 220,
+      render: (_: unknown, row: CdrItem) => (
         <Space size="small">
-          <Button type="link" size="small">
+          <Button type="link" size="small" onClick={() => setDetail(row)}>
             详情
           </Button>
-          <Button type="link" size="small">
+          <Button type="link" size="small" onClick={() => void onPlayRecording(row)}>
             录音
           </Button>
-          <Button type="link" size="small">
-            加入黑名单
-          </Button>
+          <Popconfirm
+            title={`将 ${row.caller || row.callee || "该号码"} 加入黑名单？`}
+            onConfirm={() => void onAddBlacklist(row)}
+          >
+            <Button type="link" size="small">
+              加入黑名单
+            </Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -242,27 +326,48 @@ export function CdrPage({
         columns={columns}
         dataSource={items}
         loading={loading}
-        pagination={false}
+        pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 条` }}
+        scroll={{ x: 1400 }}
       />
 
-      {items.map((record) => (
-        <Descriptions
-          key={`detail-${record.vr_call_id}`}
-          title="详情"
-          style={{ marginTop: 16 }}
-          column={3}
-        >
-          <Descriptions.Item label="坐席时长">
-            {record.agent_billsec}
-          </Descriptions.Item>
-          <Descriptions.Item label="排队时长">
-            {record.queue_sec}
-          </Descriptions.Item>
-          <Descriptions.Item label="机器人时长">
-            {record.robot_sec}
-          </Descriptions.Item>
-        </Descriptions>
-      ))}
+      <Modal
+        title="话单详情"
+        open={detail !== null}
+        onCancel={() => setDetail(null)}
+        footer={
+          <Button type="primary" onClick={() => setDetail(null)}>
+            关闭
+          </Button>
+        }
+        width={720}
+        destroyOnHidden
+      >
+        {detail ? (
+          <Descriptions column={2} size="small">
+            <Descriptions.Item label="通话 ID" span={2}>
+              {detail.vr_call_id}
+            </Descriptions.Item>
+            <Descriptions.Item label="主叫">{detail.caller || "—"}</Descriptions.Item>
+            <Descriptions.Item label="被叫">{detail.callee || "—"}</Descriptions.Item>
+            <Descriptions.Item label="方向">{detail.direction || "—"}</Descriptions.Item>
+            <Descriptions.Item label="挂断原因">{detail.hangup_cause || "—"}</Descriptions.Item>
+            <Descriptions.Item label="开始时间">
+              {formatCdrTime(detail.started_at)}
+            </Descriptions.Item>
+            <Descriptions.Item label="接通时间">
+              {formatCdrTime(detail.answered_at)}
+            </Descriptions.Item>
+            <Descriptions.Item label="结束时间">
+              {formatCdrTime(detail.ended_at)}
+            </Descriptions.Item>
+            <Descriptions.Item label="通话时长">{detail.billsec}</Descriptions.Item>
+            <Descriptions.Item label="持续时长">{detail.duration}</Descriptions.Item>
+            <Descriptions.Item label="坐席时长">{detail.agent_billsec}</Descriptions.Item>
+            <Descriptions.Item label="排队时长">{detail.queue_sec}</Descriptions.Item>
+            <Descriptions.Item label="机器人时长">{detail.robot_sec}</Descriptions.Item>
+          </Descriptions>
+        ) : null}
+      </Modal>
     </div>
   );
 }

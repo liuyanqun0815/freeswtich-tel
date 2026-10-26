@@ -56,3 +56,50 @@ def test_get_cdr_summary_rates_and_fee_display():
     assert body["summary"]["fee_display"] == "—"
     assert body["summary"]["answer_rate"] == 0.5
     assert body["summary"]["restricted_rate"] == 0.5
+    answered = next(item for item in body["items"] if item["vr_call_id"] == "answered-1")
+    assert answered["answered_at"].startswith("2026-10-21T10:00:00")
+    assert "started_at" in answered
+    assert "ended_at" in answered
+
+
+def test_list_cdr_newest_first():
+    seed_user("admin_cdr_order", "admin-pass", "admin", must_change_password=False)
+    db = next(get_test_session())
+    try:
+        db.add(
+            CallRecord(
+                vr_call_id="old-call",
+                tenant_id=DEFAULT_TENANT,
+                caller="1000",
+                callee="1001",
+                started_at=datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+        db.add(
+            CallRecord(
+                vr_call_id="new-call",
+                tenant_id=DEFAULT_TENANT,
+                caller="2000",
+                callee="2001",
+                started_at=datetime(2026, 10, 26, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+        db.add(
+            CallRecord(
+                vr_call_id="null-time",
+                tenant_id=DEFAULT_TENANT,
+                hangup_cause="WRONG_CALL_STATE",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin_cdr_order", "password": "admin-pass"})
+    token = login.json()["access_token"]
+    resp = client.get("/cdr", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    ids = [item["vr_call_id"] for item in resp.json()["items"]]
+    assert ids.index("new-call") < ids.index("old-call")
+    assert ids.index("null-time") > ids.index("old-call")

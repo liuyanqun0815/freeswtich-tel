@@ -23,6 +23,7 @@ export type SoftphoneApi = {
   incoming: string;
   callState: CallState;
   call: (number: string) => Promise<void>;
+  sendDtmf: (digit: string) => Promise<void>;
   answer: () => Promise<void>;
   decline: () => Promise<void>;
   hangup: () => Promise<void>;
@@ -37,6 +38,7 @@ const IDLE: SoftphoneApi = {
   incoming: "",
   callState: "idle",
   call: async () => undefined,
+  sendDtmf: async () => undefined,
   answer: async () => undefined,
   decline: async () => undefined,
   hangup: async () => undefined,
@@ -350,6 +352,21 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         setCallState("calling");
         note(`呼叫 ${sipTarget(profile, number)}`);
         await user.call(sipTarget(profile, number));
+      },
+      sendDtmf: async (digit: string) => {
+        const user = userRef.current;
+        if (!user) {
+          throw new Error("软电话未注册");
+        }
+        if (callState !== "in-call") {
+          throw new Error("接通后才能按键");
+        }
+        const tone = digit.trim();
+        if (!/^[0-9*#]$/.test(tone)) {
+          throw new Error("无效按键");
+        }
+        note(`按键 ${tone}`);
+        await user.sendDTMF(tone);
       },
       answer: async () => {
         if (!userRef.current) {

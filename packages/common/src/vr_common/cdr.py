@@ -94,6 +94,12 @@ def upsert_call_record(db: Session, row: dict[str, Any]) -> None:
     db.commit()
 
 
+def _iso(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.isoformat()
+
+
 def call_record_to_item(record: CallRecord) -> dict[str, Any]:
     """Serialize a CallRecord for the CDR list API (no fee fields)."""
     return {
@@ -101,6 +107,9 @@ def call_record_to_item(record: CallRecord) -> dict[str, Any]:
         "caller": record.caller or "",
         "callee": record.callee or "",
         "direction": record.direction or "",
+        "started_at": _iso(record.started_at),
+        "answered_at": _iso(record.answered_at),
+        "ended_at": _iso(record.ended_at),
         "billsec": record.billsec or 0,
         "duration": record.duration or 0,
         "agent_billsec": record.agent_billsec or 0,

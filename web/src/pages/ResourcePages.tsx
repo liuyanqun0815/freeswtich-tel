@@ -236,7 +236,30 @@ export function AgentWorkbenchPage({
           挂断
         </Button>
       </Space>
-      <div>通话：{callLabel}</div>
+      <div style={{ marginBottom: 12 }}>通话：{callLabel}</div>
+      <Typography.Text type="secondary">IVR 按键（通话中可用）</Typography.Text>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 48px)",
+          gap: 8,
+          marginTop: 8,
+        }}
+      >
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"].map((digit) => (
+          <Button
+            key={digit}
+            disabled={softphone.callState !== "in-call"}
+            onClick={() => {
+              void softphone.sendDtmf(digit).catch((err) => {
+                message.error(err instanceof Error ? err.message : "按键失败");
+              });
+            }}
+          >
+            {digit}
+          </Button>
+        ))}
+      </div>
     </div>
   );
 }
