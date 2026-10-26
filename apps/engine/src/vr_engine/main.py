@@ -62,6 +62,8 @@ class EngineCtx:
     ivr_snapshots: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     ivr_buffers: dict[str, str] = field(default_factory=dict)
     skill_groups: dict[str, list[str]] = field(default_factory=dict)
+    # call_id -> 待 CHANNEL_ANSWER 后播放的路径（避免 answer/broadcast 竞态导致无声）
+    pending_playback: dict[str, str] = field(default_factory=dict)
 
 
 def load_engine_ctx(
@@ -454,30 +456,27 @@ def run_maintenance(ctx: EngineCtx) -> list[FsCommand]:
 
 
 def _load_ivr(ctx: EngineCtx, flow_key: str) -> tuple[int, dict[str, Any]] | None:
-    cached = ctx.ivr_snapshots.get(flow_key)
-    if cached is not None:
-        return cached
-    if ctx.db is None or not str(flow_key).isdigit():
-        return None
-    row = ctx.db.scalars(
-        select(IvrPublish)
-        .where(
-            IvrPublish.flow_id == int(flow_key),
-            IvrPublish.tenant_id == DEFAULT_TENANT,
-        )
-        .order_by(IvrPublish.version.desc())
-    ).first()
-    if row is None:
-        return None
-    try:
-        snapshot = json.loads(row.snapshot_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(snapshot, dict):
-        return None
-    loaded = (row.version, snapshot)
-    ctx.ivr_snapshots[flow_key] = loaded
-    return loaded
+    if ctx.db is not None and str(flow_key).isdigit():
+        row = ctx.db.scalars(
+            select(IvrPublish)
+            .where(
+                IvrPublish.flow_id == int(flow_key),
+                IvrPublish.tenant_id == DEFAULT_TENANT,
+            )
+            .order_by(IvrPublish.version.desc())
+        ).first()
+        if row is None:
+            return None
+        try:
+            snapshot = json.loads(row.snapshot_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        loaded = (row.version, snapshot)
+        ctx.ivr_snapshots[flow_key] = loaded
+        return loaded
+    return ctx.ivr_snapshots.get(flow_key)
 
 
 def _find_ivr_node(snapshot: dict[str, Any], node_id: str) -> dict[str, Any] | None:
@@ -497,6 +496,30 @@ def _node_prompt(snapshot: dict[str, Any], node_id: str) -> str:
         return ""
     prompt = node.get("prompt") or node.get("file") or ""
     return str(prompt) if prompt else ""
+
+
+def resolve_playback_path(path: str) -> str:
+    """Map relative custom prompts onto VR_SOUND_DIR; leave FS stock names alone."""
+    raw = (path or "").strip()
+    if not raw:
+        return ""
+    if (
+        raw.startswith(("/", "phrase:", "say:", "tone_stream:", "file_string:"))
+        or "://" in raw
+    ):
+        return raw
+    # FreeSWITCH sound_prefix 下的内置音，例如 ivr/ivr-welcome
+    if raw.startswith("ivr/"):
+        return raw
+    sound_dir = os.environ.get("VR_SOUND_DIR", "/usr/local/freeswitch/sounds/vr").rstrip("/")
+    return f"{sound_dir}/{raw.lstrip('./')}"
+
+
+def _broadcast(uuid: str, path: str) -> FsCommand | None:
+    resolved = resolve_playback_path(path)
+    if not resolved:
+        return None
+    return FsCommand("uuid_broadcast", f"{uuid} {resolved} aleg")
 
 
 def _skill_group_members(ctx: EngineCtx, skill_group_id: Any) -> list[str]:
@@ -545,8 +568,9 @@ def _ivr_follow(
     cmds: list[FsCommand] = []
     if action == "replay":
         prompt = _node_prompt(snapshot, node_id)
-        if prompt:
-            cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+        cmd = _broadcast(uuid, prompt) if prompt else None
+        if cmd is not None:
+            cmds.append(cmd)
         return node_id, cmds
     if action in {"parent", "goto"}:
         kind = str(result.get("kind") or "")
@@ -554,7 +578,9 @@ def _ivr_follow(
         if kind == "hangup":
             cmds.append(FsCommand("uuid_kill", uuid))
         elif kind == "playback" and target:
-            cmds.append(FsCommand("uuid_broadcast", f"{uuid} {target} aleg"))
+            cmd = _broadcast(uuid, str(target))
+            if cmd is not None:
+                cmds.append(cmd)
             return node_id, cmds
         elif kind == "queue" and target:
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
@@ -577,8 +603,9 @@ def _ivr_follow(
             )
         else:
             prompt = str(result.get("prompt") or "") or _node_prompt(snapshot, next_node)
-            if prompt:
-                cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+            cmd = _broadcast(uuid, prompt) if prompt else None
+            if cmd is not None:
+                cmds.append(cmd)
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_node={next_node}"))
         return next_node, cmds
     if action == "complete":
@@ -604,7 +631,8 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     cmds = [FsCommand("uuid_answer", uuid)]
     prompt = _node_prompt(snapshot, node_id)
     if prompt:
-        cmds.append(FsCommand("uuid_broadcast", f"{uuid} {prompt} aleg"))
+        # 等 CHANNEL_ANSWER 再 broadcast，否则软电话侧常听不到欢迎音
+        ctx.pending_playback[call_id] = resolve_playback_path(prompt)
     cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"))
     return cmds
 
@@ -639,10 +667,10 @@ def _commands_for_entry(
             FsCommand("uuid_setvar", f"{uuid} vr_skill_group={entry.target}"),
         ]
     if entry.kind == "playback":
-        return [
-            FsCommand("uuid_answer", uuid),
-            FsCommand("uuid_broadcast", f"{uuid} {entry.target} aleg"),
-        ]
+        resolved = resolve_playback_path(entry.target)
+        if resolved:
+            ctx.pending_playback[call_id] = resolved
+        return [FsCommand("uuid_answer", uuid)]
     return []
 
 
@@ -749,6 +777,18 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 )
         else:
             logger.info("channel park uuid=%s call_id=%s skipped=already-handled", uuid or "-", call_id or "-")
+    elif event_name == "CHANNEL_ANSWER":
+        pending = ctx.pending_playback.pop(call_id, "") if call_id else ""
+        if pending and uuid:
+            cmd = _broadcast(uuid, pending)
+            if cmd is not None:
+                cmds.append(cmd)
+                logger.info(
+                    "channel answer playback uuid=%s call_id=%s path=%s",
+                    uuid,
+                    call_id or "-",
+                    pending,
+                )
     elif event_name == "DTMF":
         cmds = _handle_dtmf(ctx, event, call_id, uuid)
     elif event_name == "HEARTBEAT":
@@ -810,20 +850,24 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         updated = apply_event(row, _cdr_payload(event, call_id))
         ctx.cdr_rows[call_id] = updated
         _xadd_cdr(ctx, updated)
-        if event_name == "CHANNEL_HANGUP_COMPLETE" and ctx.db is not None:
-            try:
-                upsert_call_record(ctx.db, updated)
-                logger.info(
-                    "cdr saved call_id=%s caller=%s callee=%s billsec=%s cause=%s",
-                    call_id,
-                    updated.get("caller") or "-",
-                    updated.get("callee") or "-",
-                    updated.get("billsec", "-"),
-                    updated.get("hangup_cause") or "-",
-                )
-            except Exception:
-                logger.exception("cdr save failed call_id=%s", call_id)
-                ctx.db.rollback()
+        if event_name == "CHANNEL_HANGUP_COMPLETE":
+            if call_id:
+                ctx.pending_playback.pop(call_id, None)
+                ctx.ivr_buffers.pop(call_id, None)
+            if ctx.db is not None:
+                try:
+                    upsert_call_record(ctx.db, updated)
+                    logger.info(
+                        "cdr saved call_id=%s caller=%s callee=%s billsec=%s cause=%s",
+                        call_id,
+                        updated.get("caller") or "-",
+                        updated.get("callee") or "-",
+                        updated.get("billsec", "-"),
+                        updated.get("hangup_cause") or "-",
+                    )
+                except Exception:
+                    logger.exception("cdr save failed call_id=%s", call_id)
+                    ctx.db.rollback()
 
     try:
         apply_verify_event(event, cmds)

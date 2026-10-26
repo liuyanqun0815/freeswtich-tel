@@ -132,8 +132,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
       REDIS_URL: redis://redis:6379/0
+      VR_SOUND_DIR: ${VR_SOUND_DIR:-/usr/local/freeswitch/sounds/vr}
       # FS 在宿主机或公网时，用 host.docker.internal / 真实 IP
       FS_HOST: ${FS_HOST:-host.docker.internal}
+    volumes:
+      - ${VR_SOUND_HOST_DIR:-/usr/local/freeswitch/sounds/vr}:${VR_SOUND_DIR:-/usr/local/freeswitch/sounds/vr}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

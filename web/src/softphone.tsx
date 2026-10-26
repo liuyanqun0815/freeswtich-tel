@@ -114,6 +114,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
   const [incoming, setIncoming] = useState("");
   const [callState, setCallState] = useState<CallState>("idle");
   const toneContext = useRef<AudioContext | null>(null);
+  const answeringRef = useRef(false);
   const toneKind: ToneKind | "" = incoming ? "ring" : callState === "calling" ? "ringback" : "";
 
   useEffect(() => {
@@ -219,6 +220,8 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
           }
         },
         sessionDescriptionHandlerFactoryOptions: {
+          // sip.js 默认等满 5000ms 才发 SDP，接听会明显卡约 5 秒；host 候选通常数百毫秒内就绪
+          iceGatheringTimeout: 800,
           peerConnectionConfiguration: { iceServers: profile.iceServers },
         },
       },
@@ -369,18 +372,26 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         await user.sendDTMF(tone);
       },
       answer: async () => {
-        if (!userRef.current) {
+        if (!userRef.current || answeringRef.current) {
           return;
         }
+        answeringRef.current = true;
+        note("正在接听…");
         try {
           await userRef.current.answer();
         } catch (err) {
           const text = errorText(err);
-          const message = text.includes("CANCEL") ? "对方已取消呼叫，接听没有完成" : text;
+          const message = text.includes("CANCEL")
+            ? "对方已取消呼叫，接听没有完成"
+            : text.includes("Establishing")
+              ? "正在接通中，请稍候"
+              : text;
           note(message);
           setError(message);
           setIncoming("");
           setCallState("idle");
+        } finally {
+          answeringRef.current = false;
         }
       },
       decline: async () => {

@@ -241,9 +241,21 @@ def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
     )
     apis = [cmd.api for cmd in parked]
     assert "uuid_answer" in apis
-    assert any("ivr/welcome.wav" in cmd.args for cmd in parked)
+    assert all(cmd.api != "uuid_broadcast" for cmd in parked)
+    assert ctx.pending_playback["c1"] == "ivr/welcome.wav"
     assert all(cmd.api != "transfer" for cmd in parked)
     assert ctx.sessions["c1"].ivr_version == 2
+
+    answered = handle_event(
+        {
+            "Event-Name": "CHANNEL_ANSWER",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c1",
+        },
+        ctx,
+    )
+    assert any(cmd.api == "uuid_broadcast" and "ivr/welcome.wav" in cmd.args for cmd in answered)
+    assert "c1" not in ctx.pending_playback
 
     digits = handle_event(
         {
