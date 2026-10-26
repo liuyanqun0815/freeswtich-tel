@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -35,6 +39,15 @@ from vr_common.security import hash_password
 router = APIRouter(tags=["resources"])
 
 _ALLOWED_FALLBACKS = frozenset({"transfer", "hangup"})
+_AUDIO_EXTS = frozenset({".wav", ".mp3", ".gsm"})
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sound_dir() -> Path:
+    raw = os.environ.get("VR_SOUND_DIR", "/usr/local/freeswitch/sounds/vr").strip()
+    path = Path(raw or "/usr/local/freeswitch/sounds/vr")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _force_tenant(data: dict[str, Any]) -> dict[str, Any]:
@@ -931,3 +944,25 @@ def bind_user_extension(
     db.commit()
     db.refresh(row)
     return _user_view(db, row)
+
+
+@router.post("/media/upload")
+async def upload_media(
+    _: Annotated[User, Depends(require_admin)],
+    file: UploadFile = File(...),
+) -> dict:
+    filename = (file.filename or "").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _AUDIO_EXTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持 wav / mp3 / gsm 音频",
+        )
+    stem = _SAFE_NAME.sub("_", Path(filename).stem).strip("._") or "audio"
+    out_name = f"{stem}-{uuid.uuid4().hex[:10]}{suffix}"
+    dest = _sound_dir() / out_name
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空文件")
+    dest.write_bytes(content)
+    return {"path": str(dest.resolve()), "filename": out_name}

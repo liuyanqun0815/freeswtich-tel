@@ -75,8 +75,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      VR_SOUND_DIR: ${VR_SOUND_DIR:-/usr/local/freeswitch/sounds/vr}
     ports:
       - "8080:8080"
+    volumes:
+      - ${VR_SOUND_HOST_DIR:-/usr/local/freeswitch/sounds/vr}:${VR_SOUND_DIR:-/usr/local/freeswitch/sounds/vr}
     depends_on:
       migrate:
         condition: service_completed_successfully

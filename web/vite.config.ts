@@ -11,6 +11,7 @@ export default defineConfig({
       "/cdr": "http://127.0.0.1:8080",
       "/releases": "http://127.0.0.1:8080",
       "/ivr": "http://127.0.0.1:8080",
+      "/media": "http://127.0.0.1:8080",
       "/extensions": "http://127.0.0.1:8080",
       "/gateways": "http://127.0.0.1:8080",
       "/numbers": "http://127.0.0.1:8080",

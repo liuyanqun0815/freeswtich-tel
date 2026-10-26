@@ -10,13 +10,53 @@ import {
   Table,
   Tag,
   Typography,
+  Upload,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, getToken } from "../auth";
+import { api, getToken, uploadMedia } from "../auth";
 import { usePhoneStatus } from "../phoneStatus";
 import { useSoftphone } from "../softphone";
+
+function SoundPathField({
+  value,
+  onChange,
+  placeholder = "/usr/local/freeswitch/sounds/vr/xxx.wav",
+}: {
+  value?: string;
+  onChange?: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <Space.Compact style={{ width: "100%" }}>
+      <Input
+        value={value}
+        onChange={(event) => onChange?.(event.target.value)}
+        placeholder={placeholder}
+      />
+      <Upload
+        accept=".wav,.mp3,.gsm,audio/*"
+        showUploadList={false}
+        customRequest={async (options) => {
+          const file = options.file as File;
+          try {
+            const result = await uploadMedia(file);
+            onChange?.(result.path);
+            message.success("上传成功");
+            options.onSuccess?.(result);
+          } catch (err) {
+            const text = err instanceof Error ? err.message : "上传失败";
+            message.error(text);
+            options.onError?.(err as Error);
+          }
+        }}
+      >
+        <Button>上传</Button>
+      </Upload>
+    </Space.Compact>
+  );
+}
 
 type PageShellProps = {
   title: string;
@@ -448,7 +488,7 @@ type NumberForm = {
   label?: string;
   enabled: boolean;
   entry_kind?: string;
-  entry_target?: string;
+  entry_target?: string | number;
 };
 
 type GatewayRow = {
@@ -481,17 +521,46 @@ const ENTRY_KIND_OPTIONS = [
   { value: "playback", label: "放音" },
 ];
 
-function entryLabel(row: NumberRow): string {
+type EntryOptionRow = { id: number; ext_number?: string; display_name?: string | null; name?: string };
+
+function entryLabel(
+  row: NumberRow,
+  lookups: {
+    extensions: EntryOptionRow[];
+    skillGroups: EntryOptionRow[];
+    ivrFlows: EntryOptionRow[];
+  },
+): string {
   if (!row.entry_kind || !row.entry_target) {
     return "—";
   }
   const kind = ENTRY_KIND_OPTIONS.find((item) => item.value === row.entry_kind)?.label ?? row.entry_kind;
-  return `${kind} / ${row.entry_target}`;
+  let target = row.entry_target;
+  if (row.entry_kind === "extension") {
+    const ext = lookups.extensions.find((item) => item.ext_number === row.entry_target);
+    if (ext?.display_name) {
+      target = `${ext.ext_number} ${ext.display_name}`;
+    }
+  } else if (row.entry_kind === "queue") {
+    const sg = lookups.skillGroups.find((item) => String(item.id) === row.entry_target);
+    if (sg?.name) {
+      target = sg.name;
+    }
+  } else if (row.entry_kind === "ivr") {
+    const flow = lookups.ivrFlows.find((item) => String(item.id) === row.entry_target);
+    if (flow?.name) {
+      target = `${flow.id} ${flow.name}`;
+    }
+  }
+  return `${kind} / ${target}`;
 }
 
 export function GatewaysNumbersPage() {
   const [numbers, setNumbers] = useState<NumberRow[]>([]);
   const [gateways, setGateways] = useState<GatewayRow[]>([]);
+  const [extensions, setExtensions] = useState<EntryOptionRow[]>([]);
+  const [skillGroups, setSkillGroups] = useState<EntryOptionRow[]>([]);
+  const [ivrFlows, setIvrFlows] = useState<EntryOptionRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [numberOpen, setNumberOpen] = useState(false);
   const [gatewayOpen, setGatewayOpen] = useState(false);
@@ -504,11 +573,20 @@ export function GatewaysNumbersPage() {
     if (!getToken()) {
       setNumbers([]);
       setGateways([]);
+      setExtensions([]);
+      setSkillGroups([]);
+      setIvrFlows([]);
       return;
     }
     setLoading(true);
     try {
-      const [numberResp, gatewayResp] = await Promise.all([api("/numbers"), api("/gateways")]);
+      const [numberResp, gatewayResp, extResp, sgResp, ivrResp] = await Promise.all([
+        api("/numbers"),
+        api("/gateways"),
+        api("/extensions"),
+        api("/skill-groups"),
+        api("/ivr"),
+      ]);
       if (numberResp.ok) {
         const body = (await numberResp.json()) as { items: NumberRow[] };
         setNumbers(body.items);
@@ -516,6 +594,18 @@ export function GatewaysNumbersPage() {
       if (gatewayResp.ok) {
         const body = (await gatewayResp.json()) as { items: GatewayRow[] };
         setGateways(body.items);
+      }
+      if (extResp.ok) {
+        const body = (await extResp.json()) as { items: EntryOptionRow[] };
+        setExtensions(body.items ?? []);
+      }
+      if (sgResp.ok) {
+        const body = (await sgResp.json()) as { items: EntryOptionRow[] };
+        setSkillGroups(body.items ?? []);
+      }
+      if (ivrResp.ok) {
+        const body = (await ivrResp.json()) as { items: EntryOptionRow[] };
+        setIvrFlows(body.items ?? []);
       }
     } finally {
       setLoading(false);
@@ -539,18 +629,24 @@ export function GatewaysNumbersPage() {
       label: row.label ?? "",
       enabled: row.enabled,
       entry_kind: row.entry_kind ?? undefined,
-      entry_target: row.entry_target ?? "",
+      entry_target: row.entry_target ?? undefined,
     });
     setNumberOpen(true);
   }
 
   async function onNumberSubmit(values: NumberForm) {
+    const target =
+      values.entry_kind === "queue" || values.entry_kind === "ivr"
+        ? values.entry_target != null && values.entry_target !== ""
+          ? String(values.entry_target)
+          : null
+        : values.entry_target?.toString().trim() || null;
     const body = {
       number: values.number.trim(),
       label: values.label?.trim() || null,
       enabled: values.enabled,
       entry_kind: values.entry_kind || null,
-      entry_target: values.entry_target?.trim() || null,
+      entry_target: target,
     };
     const resp = editingNumber
       ? await api(`/numbers/${editingNumber.id}`, { method: "PUT", body: JSON.stringify(body) })
@@ -670,7 +766,11 @@ export function GatewaysNumbersPage() {
         columns={[
           { title: "号码", dataIndex: "number", width: 160 },
           { title: "名称", dataIndex: "label", render: (value: string | null) => value || "—" },
-          { title: "入口", render: (_: unknown, row: NumberRow) => entryLabel(row) },
+          {
+            title: "入口",
+            render: (_: unknown, row: NumberRow) =>
+              entryLabel(row, { extensions, skillGroups, ivrFlows }),
+          },
           {
             title: "启用",
             dataIndex: "enabled",
@@ -772,10 +872,95 @@ export function GatewaysNumbersPage() {
             <Input />
           </Form.Item>
           <Form.Item name="entry_kind" label="入口类型">
-            <Select allowClear options={ENTRY_KIND_OPTIONS} placeholder="不设置入口" />
+            <Select
+              allowClear
+              options={ENTRY_KIND_OPTIONS}
+              placeholder="不设置入口"
+              onChange={() => numberForm.setFieldsValue({ entry_target: undefined })}
+            />
           </Form.Item>
-          <Form.Item name="entry_target" label="入口目标">
-            <Input placeholder="分机号、技能组或场景" />
+          <Form.Item noStyle shouldUpdate={(prev, next) => prev.entry_kind !== next.entry_kind}>
+            {() => {
+              const kind = numberForm.getFieldValue("entry_kind") as string | undefined;
+              if (!kind) {
+                return null;
+              }
+              if (kind === "extension") {
+                return (
+                  <Form.Item
+                    name="entry_target"
+                    label="入口目标"
+                    rules={[{ required: true, message: "请选择分机" }]}
+                  >
+                    <Select
+                      placeholder="选择分机"
+                      options={extensions.map((ext) => ({
+                        value: ext.ext_number,
+                        label: ext.display_name
+                          ? `${ext.ext_number} ${ext.display_name}`
+                          : ext.ext_number,
+                      }))}
+                    />
+                  </Form.Item>
+                );
+              }
+              if (kind === "queue") {
+                return (
+                  <Form.Item
+                    name="entry_target"
+                    label="入口目标"
+                    rules={[{ required: true, message: "请选择技能组" }]}
+                  >
+                    <Select
+                      placeholder="选择技能组"
+                      options={skillGroups.map((sg) => ({
+                        value: String(sg.id),
+                        label: sg.name,
+                      }))}
+                    />
+                  </Form.Item>
+                );
+              }
+              if (kind === "ivr") {
+                return (
+                  <Form.Item
+                    name="entry_target"
+                    label="入口目标"
+                    rules={[{ required: true, message: "请选择 IVR" }]}
+                  >
+                    <Select
+                      placeholder="选择 IVR 流程"
+                      options={ivrFlows.map((flow) => ({
+                        value: String(flow.id),
+                        label: `${flow.id} ${flow.name}`,
+                      }))}
+                    />
+                  </Form.Item>
+                );
+              }
+              if (kind === "playback") {
+                return (
+                  <Form.Item
+                    name="entry_target"
+                    label="入口目标"
+                    rules={[{ required: true, message: "请上传或填写放音路径" }]}
+                    extra="上传后写入 FS 可读目录，也可手填绝对路径"
+                  >
+                    <SoundPathField />
+                  </Form.Item>
+                );
+              }
+              return (
+                <Form.Item
+                  name="entry_target"
+                  label="入口目标"
+                  rules={[{ required: true, message: "请填写目标" }]}
+                  extra="机器人场景后续接入，当前先手填目标标识"
+                >
+                  <Input placeholder="机器人场景标识" />
+                </Form.Item>
+              );
+            }}
           </Form.Item>
           <Form.Item name="enabled" label="启用" valuePropName="checked">
             <Switch />
@@ -954,7 +1139,7 @@ export function IvrPage() {
     setEditing(null);
     form.setFieldsValue({
       name: "",
-      prompt: "ivr/welcome.wav",
+      prompt: "",
       keys: [{ digit: "0", kind: "extension", target: undefined, skill_group_id: undefined }],
     });
     setOpen(true);
@@ -1074,8 +1259,13 @@ export function IvrPage() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="主菜单" />
           </Form.Item>
-          <Form.Item name="prompt" label="欢迎音" rules={[{ required: true, message: "请输入欢迎音" }]}>
-            <Input placeholder="ivr/welcome.wav" />
+          <Form.Item
+            name="prompt"
+            label="欢迎音"
+            rules={[{ required: true, message: "请上传或填写欢迎音" }]}
+            extra="可上传 wav，或填 FS 路径如 ivr/ivr-welcome"
+          >
+            <SoundPathField placeholder="ivr/ivr-welcome 或上传后的绝对路径" />
           </Form.Item>
           <Form.List name="keys">
             {(fields, { add, remove }) => (
@@ -1145,9 +1335,10 @@ export function IvrPage() {
                               {...field}
                               name={[field.name, "target"]}
                               label="放音文件"
-                              rules={[{ required: true, message: "放音路径" }]}
+                              rules={[{ required: true, message: "请上传或填写放音路径" }]}
+                              style={{ minWidth: 280 }}
                             >
-                              <Input style={{ width: 200 }} placeholder="ivr/info.wav" />
+                              <SoundPathField placeholder="上传或填写路径" />
                             </Form.Item>
                           );
                         }
