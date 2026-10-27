@@ -59,6 +59,19 @@ def test_llm_http_error_raises_provider_error():
         _collect(llm, [])
 
 
+def test_llm_malformed_sse_raises_provider_error():
+    llm = OpenAiLlm(
+        {"base_url": "https://llm.example/v1", "model": "m1"},
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, content=b"data: not-json\n\n", headers={"content-type": "text/event-stream"}
+            )
+        ),
+    )
+    with pytest.raises(ProviderError, match="bad response"):
+        _collect(llm, [])
+
+
 def test_missing_key_env_is_rejected(monkeypatch):
     monkeypatch.delenv("NOT_SET_KEY", raising=False)
     with pytest.raises(ProviderError, match="NOT_SET_KEY"):

@@ -87,6 +87,8 @@ class OpenAiLlm:
                                 tool_names[int(call.get("index") or 0)] = name
         except httpx.HTTPError as exc:
             raise ProviderError(f"llm request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"llm bad response: {exc}") from exc
         for name in tool_names.values():
             if name in _TOOL_ACTIONS:
                 yield {"action": _TOOL_ACTIONS[name]}
