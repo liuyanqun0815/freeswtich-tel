@@ -60,10 +60,8 @@ def test_park_with_variable_vr_entry_routes_when_ctx_entries_empty():
         },
         ctx,
     )
-    apis = [c.api for c in cmds]
-    assert "uuid_kill" not in apis
-    assert apis[0] == "uuid_answer"
-    assert "uuid_audio_stream" in apis
+    assert [c.api for c in cmds] == ["uuid_answer"]
+    assert [c.api for c in ctx.pending_active["c1"]] == ["uuid_setvar", "uuid_record", "uuid_audio_stream"]
 
 
 def test_park_decision_reason_names_unparsed_entry():

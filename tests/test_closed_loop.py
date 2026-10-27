@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from support import get_test_session, seed_user
 from vr_api.main import app
+from vr_common.commands import FsCommand
 from vr_common.db import DEFAULT_TENANT
 from vr_common.esljobs import MemoryJobQueue, set_job_queue
 from vr_common.inbound import EntryView
@@ -242,7 +243,7 @@ def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
     apis = [cmd.api for cmd in parked]
     assert "uuid_answer" in apis
     assert all(cmd.api != "uuid_broadcast" for cmd in parked)
-    assert ctx.pending_playback["c1"] == "ivr/welcome.wav"
+    assert ctx.pending_active["c1"] == [FsCommand("uuid_broadcast", "u1 ivr/welcome.wav aleg")]
     assert all(cmd.api != "transfer" for cmd in parked)
     assert ctx.sessions["c1"].ivr_version == 2
 
@@ -257,7 +258,7 @@ def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
         ctx,
     )
     assert early == []
-    assert ctx.pending_playback["c1"] == "ivr/welcome.wav"
+    assert ctx.pending_active["c1"] == [FsCommand("uuid_broadcast", "u1 ivr/welcome.wav aleg")]
 
     active = handle_event(
         {
@@ -269,7 +270,7 @@ def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
         ctx,
     )
     assert any(cmd.api == "uuid_broadcast" and "ivr/welcome.wav" in cmd.args for cmd in active)
-    assert "c1" not in ctx.pending_playback
+    assert "c1" not in ctx.pending_active
 
     digits = handle_event(
         {

@@ -19,11 +19,11 @@ from vr_common.dialer import TaskWindow, next_action
 from vr_common.dispatch import offer
 from vr_common.esljobs import drain_commands
 from vr_common.sipcred import domain_for_tenant
-from vr_common.inbound import EntryView, decide_park
+from vr_common.inbound import EntryView, decide_park, robot_stream_commands
 from vr_common.ivr import step as ivr_step
 from vr_common.ivr_route import pick_bridge_extension
 from vr_common.models import ConfigRelease, Entry, IvrPublish, PhoneNumber, SkillGroup
-from vr_common.protocol import commands_for_cancel
+from vr_common.protocol import commands_for_cancel, commands_for_transfer
 from vr_common.reconcile import kill_for_missing_in_redis, reconcile
 from vr_common.registration import (
     extension_from_register_event,
@@ -62,7 +62,7 @@ class EngineCtx:
     ivr_snapshots: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     ivr_buffers: dict[str, str] = field(default_factory=dict)
     skill_groups: dict[str, list[str]] = field(default_factory=dict)
-    pending_playback: dict[str, str] = field(default_factory=dict)
+    pending_active: dict[str, list[FsCommand]] = field(default_factory=dict)
 
 
 def load_engine_ctx(
@@ -501,14 +501,35 @@ def _broadcast(uuid: str, path: str) -> FsCommand:
     return FsCommand("uuid_broadcast", f"{uuid} {path} aleg")
 
 
-def _flush_pending_playback(ctx: EngineCtx, call_id: str, uuid: str) -> list[FsCommand]:
+def _flush_pending_active(ctx: EngineCtx, call_id: str) -> list[FsCommand]:
+    cmds = ctx.pending_active.pop(call_id, [])
+    if cmds:
+        logger.info("channel active call_id=%s cmds=%s", call_id, " | ".join(f"{c.api} {c.args}" for c in cmds))
+    return cmds
+
+
+def _stream_play_commands(event: dict[str, Any], uuid: str) -> list[FsCommand]:
+    try:
+        body = json.loads(event.get("_body") or "{}")
+    except json.JSONDecodeError:
+        return []
+    path = str(body.get("file") or "") if isinstance(body, dict) else ""
+    if not path or not uuid:
+        return []
+    return [_broadcast(uuid, path)]
+
+
+def _ai_command(ctx: EngineCtx, event: dict[str, Any], uuid: str) -> list[FsCommand]:
+    kind = event.get("type")
     if not uuid:
         return []
-    path = ctx.pending_playback.pop(call_id, "")
-    if not path:
-        return []
-    logger.info("channel active playback uuid=%s call_id=%s path=%s", uuid, call_id, path)
-    return [_broadcast(uuid, path)]
+    if kind == "break":
+        return commands_for_cancel(uuid)
+    if kind == "hangup":
+        return [FsCommand("uuid_kill", uuid)]
+    if kind == "transfer":
+        return commands_for_transfer(uuid) + _bridge_extension_or_queue(ctx, uuid, "", event.get("skill_group_id"))
+    return []
 
 
 def _skill_group_members(ctx: EngineCtx, skill_group_id: Any) -> list[str]:
@@ -540,7 +561,7 @@ def _bridge_extension_or_queue(
     members = _skill_group_members(ctx, skill_group_id)
     chosen = pick_bridge_extension(preferred, members, registered=is_registered)
     if chosen is None:
-        return decide_park(None, "inbound", None, "disabled", uuid, "")
+        return decide_park("inbound", None, "disabled", uuid)
     return _bridge_extension_commands(uuid, chosen)
 
 
@@ -577,16 +598,7 @@ def _ivr_follow(
                 )
             )
         elif kind == "robot" and target:
-            cmds.extend(
-                decide_park(
-                    None,
-                    "inbound",
-                    EntryView(kind="robot", target=str(target)),
-                    "enabled",
-                    uuid,
-                    call_id,
-                )
-            )
+            cmds.extend(robot_stream_commands(uuid, call_id, str(target)))
         else:
             prompt = str(result.get("prompt") or "") or _node_prompt(snapshot, next_node)
             if prompt:
@@ -602,7 +614,7 @@ def _ivr_follow(
 def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[FsCommand]:
     loaded = _load_ivr(ctx, flow_key)
     if loaded is None:
-        return decide_park(None, "inbound", None, "disabled", uuid, call_id)
+        return decide_park("inbound", None, "disabled", uuid)
     version, snapshot = loaded
     node_id = str(snapshot.get("id") or "root")
     ctx.sessions[call_id] = CallSession(
@@ -615,7 +627,7 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     )
     prompt = _node_prompt(snapshot, node_id)
     if prompt:
-        ctx.pending_playback[call_id] = prompt
+        ctx.pending_active[call_id] = [_broadcast(uuid, prompt)]
     return [
         FsCommand("uuid_answer", uuid),
         FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"),
@@ -652,7 +664,10 @@ def _commands_for_entry(
             FsCommand("uuid_setvar", f"{uuid} vr_skill_group={entry.target}"),
         ]
     if entry.kind == "playback":
-        ctx.pending_playback[call_id] = entry.target
+        ctx.pending_active[call_id] = [_broadcast(uuid, entry.target)]
+        return [FsCommand("uuid_answer", uuid)]
+    if entry.kind == "robot":
+        ctx.pending_active[call_id] = robot_stream_commands(uuid, call_id, entry.target)
         return [FsCommand("uuid_answer", uuid)]
     return []
 
@@ -710,6 +725,8 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 mark_unregistered(ext)
         except Exception:
             logger.exception("sofia registration update failed subclass=%s", subclass)
+    elif event_name == "CUSTOM" and subclass == "mod_audio_stream::play":
+        cmds = _stream_play_commands(event, uuid)
     elif event_name == "CHANNEL_PARK":
         existing = ctx.sessions.get(call_id)
         if existing is None:
@@ -722,14 +739,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
             else:
                 number_status = "disabled"
             direction = event.get("Caller-Direction", "")
-            cmds = decide_park(
-                None,
-                direction,
-                entry,
-                number_status,
-                uuid,
-                call_id,
-            )
+            cmds = decide_park(direction, entry, number_status, uuid)
             explicit_entry = bool(event.get("variable_vr_entry"))
             if (
                 not cmds
@@ -763,7 +773,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
     elif event_name == "CHANNEL_CALLSTATE":
         # WebRTC 不渲染 EARLY 阶段的 early media，提示音必须等 ACTIVE
         if event.get("Channel-Call-State") == "ACTIVE":
-            cmds = _flush_pending_playback(ctx, call_id, uuid)
+            cmds = _flush_pending_active(ctx, call_id)
     elif event_name == "DTMF":
         cmds = _handle_dtmf(ctx, event, call_id, uuid)
     elif event_name == "HEARTBEAT":
@@ -772,6 +782,8 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         cmds = bridge(str(event["a_uuid"]), str(event["b_uuid"]))
     elif event_name == "VR_CANCEL":
         cmds = commands_for_cancel(uuid)
+    elif event_name == "VR_AI_CMD":
+        cmds = _ai_command(ctx, event, uuid)
     elif event_name == "VR_DIAL":
         action = next_action(
             datetime.fromisoformat(event["now"]),
@@ -820,6 +832,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
             "DTMF",
             "CUSTOM",
             "CHANNEL_CALLSTATE",
+            "VR_AI_CMD",
         }
     ):
         row = ctx.cdr_rows.get(call_id, {})
@@ -828,7 +841,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         _xadd_cdr(ctx, updated)
         if event_name == "CHANNEL_HANGUP_COMPLETE":
             if call_id:
-                ctx.pending_playback.pop(call_id, None)
+                ctx.pending_active.pop(call_id, None)
                 ctx.ivr_buffers.pop(call_id, None)
             if ctx.db is not None:
                 try:
