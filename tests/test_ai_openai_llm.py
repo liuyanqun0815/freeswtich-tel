@@ -72,6 +72,39 @@ def test_llm_malformed_sse_raises_provider_error():
         _collect(llm, [])
 
 
+def _llm_returning(content: bytes) -> OpenAiLlm:
+    return OpenAiLlm(
+        {"base_url": "https://llm.example/v1", "model": "m1"},
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=content, headers={"content-type": "text/event-stream"})
+        ),
+    )
+
+
+def test_llm_non_object_chunk_raises_provider_error():
+    with pytest.raises(ProviderError, match="bad response"):
+        _collect(_llm_returning(b"data: []\n\n"), [])
+
+
+def test_llm_in_stream_error_raises_provider_error():
+    with pytest.raises(ProviderError, match="overloaded"):
+        _collect(_llm_returning(b'data: {"error": {"message": "overloaded"}}\n\n'), [])
+
+
+def test_llm_empty_choices_chunk_is_ignored():
+    llm = _llm_returning(_sse({"choices": []}, {"choices": [{"delta": {"content": "你好"}}]}))
+    assert _collect(llm, []) == [{"text": "你好"}]
+
+
+def test_llm_connect_error_raises_provider_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    llm = OpenAiLlm({"base_url": "https://llm.example/v1", "model": "m1"}, transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderError, match="request failed"):
+        _collect(llm, [])
+
+
 def test_missing_key_env_is_rejected(monkeypatch):
     monkeypatch.delenv("NOT_SET_KEY", raising=False)
     with pytest.raises(ProviderError, match="NOT_SET_KEY"):

@@ -55,6 +55,21 @@ async def _raise_for_status(resp: httpx.Response, kind: str) -> None:
         raise ProviderError(f"{kind} http {resp.status_code}: {detail}")
 
 
+def _delta(data: str) -> dict[str, Any]:
+    try:
+        chunk = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(f"llm bad response: {exc}") from exc
+    if not isinstance(chunk, dict):
+        raise ProviderError(f"llm bad response: {data[:200]}")
+    if chunk.get("error"):
+        raise ProviderError(f"llm stream error: {chunk['error']}")
+    choices = chunk.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else None
+    delta = first.get("delta") if isinstance(first, dict) else None
+    return delta if isinstance(delta, dict) else {}
+
+
 class OpenAiLlm:
     def __init__(self, config: dict[str, Any], transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._endpoint = _Endpoint(config, transport)
@@ -77,18 +92,20 @@ class OpenAiLlm:
                         data = line[5:].strip()
                         if data == "[DONE]":
                             break
-                        choices = json.loads(data).get("choices") or [{}]
-                        delta = choices[0].get("delta") or {}
+                        delta = _delta(data)
                         if delta.get("content"):
                             yield {"text": delta["content"]}
-                        for call in delta.get("tool_calls") or []:
-                            name = (call.get("function") or {}).get("name")
-                            if name:
-                                tool_names[int(call.get("index") or 0)] = name
+                        tool_calls = delta.get("tool_calls")
+                        for call in tool_calls if isinstance(tool_calls, list) else []:
+                            if not isinstance(call, dict):
+                                continue
+                            function = call.get("function")
+                            name = function.get("name") if isinstance(function, dict) else None
+                            if isinstance(name, str) and name:
+                                index = call.get("index")
+                                tool_names[index if isinstance(index, int) else 0] = name
         except httpx.HTTPError as exc:
             raise ProviderError(f"llm request failed: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise ProviderError(f"llm bad response: {exc}") from exc
         for name in tool_names.values():
             if name in _TOOL_ACTIONS:
                 yield {"action": _TOOL_ACTIONS[name]}
