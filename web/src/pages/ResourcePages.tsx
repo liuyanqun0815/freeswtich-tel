@@ -1616,6 +1616,7 @@ type AiSceneRow = {
   name: string;
   opening: string;
   fallback: string;
+  ws_url?: string | null;
   system_prompt: string;
   transfer_skill_group_id: number | null;
   asr: ProviderConfig;
@@ -1710,6 +1711,7 @@ export function AiScenesPage() {
 
   function openCreate() {
     setEditing(null);
+    form.resetFields();
     form.setFieldsValue({
       name: "",
       opening: "",
@@ -1725,6 +1727,7 @@ export function AiScenesPage() {
 
   function openEdit(row: AiSceneRow) {
     setEditing(row);
+    form.resetFields();
     form.setFieldsValue({ ...row, transfer_skill_group_id: row.transfer_skill_group_id ?? undefined });
     setOpen(true);
   }
@@ -1734,6 +1737,7 @@ export function AiScenesPage() {
       name: values.name.trim(),
       opening: values.opening?.trim() ?? "",
       fallback: values.fallback,
+      ws_url: editing?.ws_url ?? null,
       system_prompt: values.system_prompt?.trim() ?? "",
       transfer_skill_group_id: values.transfer_skill_group_id ?? null,
       asr: providerBody(values.asr),

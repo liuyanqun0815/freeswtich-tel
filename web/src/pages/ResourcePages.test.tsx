@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { MENU_LABELS } from "../menu";
 import {
@@ -75,4 +75,37 @@ test("ai scenes page opens a form with recognition, synthesis and llm sections",
   expect(screen.getByText("语音合成")).toBeInTheDocument();
   expect(screen.getByText("大模型")).toBeInTheDocument();
   expect(screen.getAllByText("密钥环境变量名").length).toBe(3);
+});
+
+test("ai scenes create form does not keep values from a previously edited scene", async () => {
+  const scene = {
+    id: 1,
+    name: "售后机器人",
+    opening: "",
+    fallback: "transfer",
+    ws_url: null,
+    system_prompt: "",
+    transfer_skill_group_id: null,
+    asr: { base_url: "https://asr.example/v1", model: "asr-1", language: "zh" },
+    tts: { base_url: "https://tts.example/v1", model: "tts-1", voice: "anna", sample_rate: 24000 },
+    llm: { base_url: "https://llm.example/v1", model: "llm-1" },
+  };
+  const fetchMock = vi.fn(async (url: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ items: String(url).startsWith("/ai-scenes") ? [scene] : [] }),
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  sessionStorage.setItem("vr_access_token", "test-token");
+  try {
+    render(<AiScenesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+    expect(await screen.findByPlaceholderText("alloy")).toHaveValue("anna");
+    fireEvent.click(screen.getByRole("button", { name: /^(取\s*消|Cancel)$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
+    await waitFor(() => expect(screen.getByPlaceholderText("alloy")).toHaveValue(""));
+  } finally {
+    sessionStorage.removeItem("vr_access_token");
+    vi.unstubAllGlobals();
+  }
 });
