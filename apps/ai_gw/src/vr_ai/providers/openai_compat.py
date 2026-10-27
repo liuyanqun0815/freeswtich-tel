@@ -147,7 +147,13 @@ class OpenAiAsr:
         except httpx.HTTPError as exc:
             raise ProviderError(f"asr request failed: {exc}") from exc
         await _raise_for_status(resp, "asr")
-        return str(resp.json().get("text") or "").strip()
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ProviderError(f"asr bad response: {exc}") from exc
+        if not isinstance(body, dict):
+            raise ProviderError(f"asr bad response: {resp.text[:200]}")
+        return str(body.get("text") or "").strip()
 
 
 class OpenAiTts:

@@ -49,6 +49,30 @@ def test_asr_http_error_raises_provider_error():
         asyncio.run(session.finish())
 
 
+def test_asr_non_json_body_raises_provider_error():
+    asr = OpenAiAsr(
+        {"base_url": "https://asr.example/v1"},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text="<html>")),
+    )
+    session = asr.open()
+    session.feed(b"\x00\x00" * 10)
+    with pytest.raises(ProviderError, match="bad response"):
+        asyncio.run(session.finish())
+
+
+def test_tts_http_error_raises_provider_error():
+    tts = OpenAiTts(
+        {"base_url": "https://tts.example/v1"},
+        transport=httpx.MockTransport(lambda request: httpx.Response(500, text="boom")),
+    )
+
+    async def run() -> bytes:
+        return b"".join([chunk async for chunk in tts.stream("你好")])
+
+    with pytest.raises(ProviderError, match="500"):
+        asyncio.run(run())
+
+
 def test_tts_requests_pcm_and_resamples_to_8k():
     seen: dict = {}
 
