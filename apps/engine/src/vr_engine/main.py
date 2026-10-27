@@ -62,7 +62,6 @@ class EngineCtx:
     ivr_snapshots: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     ivr_buffers: dict[str, str] = field(default_factory=dict)
     skill_groups: dict[str, list[str]] = field(default_factory=dict)
-    # call_id -> 待 CHANNEL_ANSWER 后播放的路径（避免 answer/broadcast 竞态导致无声）
     pending_playback: dict[str, str] = field(default_factory=dict)
 
 
@@ -498,57 +497,18 @@ def _node_prompt(snapshot: dict[str, Any], node_id: str) -> str:
     return str(prompt) if prompt else ""
 
 
-def resolve_playback_path(path: str) -> str:
-    """Map relative custom prompts onto VR_SOUND_DIR; leave FS stock names alone."""
-    raw = (path or "").strip()
-    if not raw:
-        return ""
-    if (
-        raw.startswith(("/", "phrase:", "say:", "tone_stream:", "file_string:"))
-        or "://" in raw
-    ):
-        return raw
-    # FreeSWITCH sound_prefix 下的内置音，例如 ivr/ivr-welcome
-    if raw.startswith("ivr/"):
-        return raw
-    sound_dir = os.environ.get("VR_SOUND_DIR", "/usr/local/freeswitch/sounds/vr").rstrip("/")
-    return f"{sound_dir}/{raw.lstrip('./')}"
-
-
-def _broadcast(uuid: str, path: str) -> FsCommand | None:
-    resolved = resolve_playback_path(path)
-    if not resolved:
-        return None
-    return FsCommand("uuid_broadcast", f"{uuid} {resolved} aleg")
+def _broadcast(uuid: str, path: str) -> FsCommand:
+    return FsCommand("uuid_broadcast", f"{uuid} {path} aleg")
 
 
 def _flush_pending_playback(ctx: EngineCtx, call_id: str, uuid: str) -> list[FsCommand]:
-    """Play deferred prompt only after the channel is fully ACTIVE."""
-    if not call_id or not uuid:
+    if not uuid:
         return []
-    pending = ctx.pending_playback.pop(call_id, "")
-    if not pending:
+    path = ctx.pending_playback.pop(call_id, "")
+    if not path:
         return []
-    cmd = _broadcast(uuid, pending)
-    if cmd is None:
-        return []
-    logger.info(
-        "channel active playback uuid=%s call_id=%s path=%s",
-        uuid,
-        call_id,
-        pending,
-    )
-    return [cmd]
-
-
-def _callstate_is_active(event: dict[str, Any]) -> bool:
-    state = (
-        event.get("Channel-Call-State")
-        or event.get("Call-State")
-        or event.get("Channel-State")
-        or ""
-    )
-    return str(state).strip().upper() == "ACTIVE"
+    logger.info("channel active playback uuid=%s call_id=%s path=%s", uuid, call_id, path)
+    return [_broadcast(uuid, path)]
 
 
 def _skill_group_members(ctx: EngineCtx, skill_group_id: Any) -> list[str]:
@@ -597,9 +557,8 @@ def _ivr_follow(
     cmds: list[FsCommand] = []
     if action == "replay":
         prompt = _node_prompt(snapshot, node_id)
-        cmd = _broadcast(uuid, prompt) if prompt else None
-        if cmd is not None:
-            cmds.append(cmd)
+        if prompt:
+            cmds.append(_broadcast(uuid, prompt))
         return node_id, cmds
     if action in {"parent", "goto"}:
         kind = str(result.get("kind") or "")
@@ -607,9 +566,7 @@ def _ivr_follow(
         if kind == "hangup":
             cmds.append(FsCommand("uuid_kill", uuid))
         elif kind == "playback" and target:
-            cmd = _broadcast(uuid, str(target))
-            if cmd is not None:
-                cmds.append(cmd)
+            cmds.append(_broadcast(uuid, str(target)))
             return node_id, cmds
         elif kind == "queue" and target:
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_skill_group={target}"))
@@ -632,9 +589,8 @@ def _ivr_follow(
             )
         else:
             prompt = str(result.get("prompt") or "") or _node_prompt(snapshot, next_node)
-            cmd = _broadcast(uuid, prompt) if prompt else None
-            if cmd is not None:
-                cmds.append(cmd)
+            if prompt:
+                cmds.append(_broadcast(uuid, prompt))
             cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_node={next_node}"))
         return next_node, cmds
     if action == "complete":
@@ -657,14 +613,13 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
         state=f"ivr:{node_id}",
         ivr_version=version,
     )
-    cmds = [FsCommand("uuid_answer", uuid)]
     prompt = _node_prompt(snapshot, node_id)
     if prompt:
-        # WebRTC 在 EARLY/Pre-Answer 阶段播 early media 前端听不到；
-        # 必须等 Channel-Call-State=ACTIVE 再建 RTP 后 broadcast。
-        ctx.pending_playback[call_id] = resolve_playback_path(prompt)
-    cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"))
-    return cmds
+        ctx.pending_playback[call_id] = prompt
+    return [
+        FsCommand("uuid_answer", uuid),
+        FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"),
+    ]
 
 
 def _extension_transfer(uuid: str, ext: str) -> FsCommand:
@@ -697,9 +652,7 @@ def _commands_for_entry(
             FsCommand("uuid_setvar", f"{uuid} vr_skill_group={entry.target}"),
         ]
     if entry.kind == "playback":
-        resolved = resolve_playback_path(entry.target)
-        if resolved:
-            ctx.pending_playback[call_id] = resolved
+        ctx.pending_playback[call_id] = entry.target
         return [FsCommand("uuid_answer", uuid)]
     return []
 
@@ -808,8 +761,8 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
         else:
             logger.info("channel park uuid=%s call_id=%s skipped=already-handled", uuid or "-", call_id or "-")
     elif event_name == "CHANNEL_CALLSTATE":
-        # ANSWER 后 WebRTC 常先到 EARLY；此时 playback 仍会 Pre-Answer，浏览器不渲染。
-        if _callstate_is_active(event):
+        # WebRTC 不渲染 EARLY 阶段的 early media，提示音必须等 ACTIVE
+        if event.get("Channel-Call-State") == "ACTIVE":
             cmds = _flush_pending_playback(ctx, call_id, uuid)
     elif event_name == "DTMF":
         cmds = _handle_dtmf(ctx, event, call_id, uuid)
