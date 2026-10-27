@@ -26,8 +26,7 @@ case "$role" in
     exec python -m vr_engine.reader "$@"
     ;;
   ai_gw)
-    echo "ai_gw runtime is not implemented yet (NotImplementedError)." >&2
-    exit 1
+    exec uvicorn vr_ai.server:app --host 0.0.0.0 --port 8040 "$@"
     ;;
   *)
     exec "$role" "$@"

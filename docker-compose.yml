@@ -157,18 +157,24 @@ services:
       - api
       - push
 
-  # 可选：机器人网关（当前入口未实现，仅 profile 启用）
   ai_gw:
-    profiles: [ "robot" ]
     build:
       context: .
       dockerfile: Dockerfile
     command: [ "ai_gw" ]
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://vr:vr@postgres:5432/vr
+      REDIS_URL: redis://redis:6379/0
+    # FreeSWITCH 与 docker 同机，只对本机开放
+    ports:
+      - "127.0.0.1:8040:8040"
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   vr_pg:

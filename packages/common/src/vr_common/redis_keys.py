@@ -14,3 +14,4 @@ def sipcred_key(domain: str, ext: str) -> str:
 
 
 ESL_JOBS = "esl:jobs"
+AI_COMMANDS = "vr:ai:cmd"
