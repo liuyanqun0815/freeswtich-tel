@@ -138,7 +138,7 @@ class Llm(Protocol):
 | 场景不存在、配置缺字段、密钥环境变量缺失 | 按场景 `fallback`；场景都不存在时挂机 |
 | 识别、合成、大模型调用报错或超时 | 按场景 `fallback` |
 | 识别结果为空 | 忽略这一句，继续听 |
-| `ai_gw` 不可达或中途断开 | 本期不自动处理，记录日志；通话由用户挂断或 park 超时结束 |
+| `ai_gw` 不可达或中途断开 | 本期不自动处理，记录日志；通话在用户挂断或达到 `ROBOT_CALL_MAX_SECONDS`（默认 1800 秒）时结束 |
 
 `fallback=transfer` 等同第 4 节转人工；`fallback=hangup` 直接挂机。
 
@@ -153,6 +153,7 @@ class Llm(Protocol):
 - `docker-compose.yml`：`ai_gw` 去掉 `robot` profile，端口 `127.0.0.1:8040:8040`，依赖 Redis 与迁移；与其他服务一样覆盖 `DATABASE_URL`、`REDIS_URL` 为容器内地址。
 - `deploy/docker-entrypoint.sh`：`ai_gw` 启动 `uvicorn vr_ai.server:app --host 0.0.0.0 --port 8040`。
 - `engine` 新增环境变量 `AI_GW_WS_URL`，默认 `ws://127.0.0.1:8040/fs/stream`（FS 与 docker 在同一宿主机）。
+- `config` 新增环境变量 `ROBOT_CALL_MAX_SECONDS`，默认 1800：机器人与 IVR 通话全程在 park 中进行，其拨号计划的 `park_timeout` 用这个值；其他入口仍用 `RING_TIMEOUT_SECONDS`。
 - `ai_gw` 依赖：`fastapi`、`httpx`、`soxr`、`webrtcvad-wheels`、`redis`、`sqlalchemy`。
 
 ## 9. 测试

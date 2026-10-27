@@ -300,7 +300,10 @@ def handle_ai_command(ctx: EngineCtx, transport: Any, raw: str) -> None:
         except Exception:
             logger.exception("ai command failed raw=%s", raw[:200])
             if ctx.db is not None:
-                ctx.db.rollback()
+                try:
+                    ctx.db.rollback()
+                except Exception:
+                    logger.exception("ai command rollback failed")
 
 
 def ai_command_loop(ctx: EngineCtx, transport: Any, client: Any) -> None:

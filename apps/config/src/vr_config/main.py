@@ -67,7 +67,11 @@ def _tenant_from_domain(domain: str) -> str:
     return os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
 
 
-def _park_timeout_seconds() -> int:
+def _park_timeout_seconds(entry: str) -> int:
+    # Robot conversations and IVR menus run entirely inside park; park_timeout
+    # hangs up even answered calls, so these entries need the call-length cap.
+    if entry.startswith(("robot:", "ivr:")):
+        return int(os.environ.get("ROBOT_CALL_MAX_SECONDS", "1800"))
     return int(os.environ.get("RING_TIMEOUT_SECONDS", "20"))
 
 
@@ -221,7 +225,7 @@ async def fs_xml(
     if section == "dialplan":
         destination = _destination_number(form)
         entry = _vr_entry_for_dialplan(db, tenant_id, destination)
-        body = xmlbuild.park_dialplan(tenant_id, entry, _park_timeout_seconds())
+        body = xmlbuild.park_dialplan(tenant_id, entry, _park_timeout_seconds(entry))
         logger.info("dialplan destination=%s entry=%s", destination or "-", entry)
         return _xml_response(body)
 

@@ -44,6 +44,24 @@ def test_stream_play_event_broadcasts_the_written_file():
     assert cmds == [FsCommand("uuid_broadcast", "u1 /tmp/u1_1.wav aleg")]
 
 
+def test_stream_play_event_without_file_is_logged_and_ignored(caplog):
+    ctx = EngineCtx(entries={}, numbers={})
+    for body in (json.dumps({"audioDataType": "wav"}), "not json", "[1]"):
+        cmds = handle_event(_event("CUSTOM", **{"Event-Subclass": "mod_audio_stream::play", "_body": body}), ctx)
+        assert cmds == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len([m for m in warnings if m.startswith("audio_stream play ignored uuid=u1")]) == 3
+
+
+def test_unknown_ai_command_is_logged_and_ignored(caplog):
+    ctx = EngineCtx(entries={}, numbers={})
+    assert handle_event(_event("VR_AI_CMD", type="dance"), ctx) == []
+    assert handle_event({"Event-Name": "VR_AI_CMD", "type": "hangup"}, ctx) == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert "ai command ignored type=dance uuid=u1" in warnings
+    assert "ai command ignored type=hangup uuid=-" in warnings
+
+
 def test_ai_break_and_hangup_commands():
     ctx = EngineCtx(entries={}, numbers={})
     assert handle_event(_event("VR_AI_CMD", type="break"), ctx) == [FsCommand("uuid_break", "u1 all")]

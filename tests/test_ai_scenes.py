@@ -71,6 +71,17 @@ def test_ai_scene_rejects_plain_api_key_and_bad_fallback():
     assert bad_fallback.status_code == 400
 
 
+def test_ai_scene_rejects_api_key_env_not_ending_with_api_key():
+    client = TestClient(app)
+    headers = _admin_headers(client)
+    for config in ("asr", "tts", "llm"):
+        resp = client.post("/ai-scenes", headers=headers, json={"name": "x", config: {"api_key_env": "JWT_SECRET"}})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "api_key_env 必须是大写字母开头、以 _API_KEY 结尾的变量名"
+    lower = client.post("/ai-scenes", headers=headers, json={"name": "x", "llm": {"api_key_env": "deepseek_API_KEY"}})
+    assert lower.status_code == 400
+
+
 def test_migration_adds_columns_and_is_rerunnable():
     spec = importlib.util.spec_from_file_location("m0002", _MIGRATION)
     module = importlib.util.module_from_spec(spec)

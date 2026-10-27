@@ -166,6 +166,8 @@ class BotSession:
         finally:
             if spoken:
                 self._history.append({"role": "assistant", "content": "".join(spoken)})
+        if not spoken and not action:
+            raise ProviderError("llm empty reply")
         return action
 
     async def _speak(self, text: str) -> None:

@@ -22,7 +22,7 @@ def _collect(llm: OpenAiLlm, messages: list[dict]) -> list[dict]:
 
 
 def test_llm_streams_text_then_tool_action(monkeypatch):
-    monkeypatch.setenv("TEST_LLM_KEY", "sk-test")
+    monkeypatch.setenv("TEST_LLM_API_KEY", "sk-test")
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -38,7 +38,7 @@ def test_llm_streams_text_then_tool_action(monkeypatch):
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
     llm = OpenAiLlm(
-        {"base_url": "https://llm.example/v1/", "api_key_env": "TEST_LLM_KEY", "model": "m1"},
+        {"base_url": "https://llm.example/v1/", "api_key_env": "TEST_LLM_API_KEY", "model": "m1"},
         transport=httpx.MockTransport(handler),
     )
     items = _collect(llm, [{"role": "user", "content": "转人工"}])
@@ -106,9 +106,15 @@ def test_llm_connect_error_raises_provider_error():
 
 
 def test_missing_key_env_is_rejected(monkeypatch):
-    monkeypatch.delenv("NOT_SET_KEY", raising=False)
-    with pytest.raises(ProviderError, match="NOT_SET_KEY"):
-        OpenAiLlm({"base_url": "https://llm.example/v1", "api_key_env": "NOT_SET_KEY"})
+    monkeypatch.delenv("NOT_SET_API_KEY", raising=False)
+    with pytest.raises(ProviderError, match="NOT_SET_API_KEY"):
+        OpenAiLlm({"base_url": "https://llm.example/v1", "api_key_env": "NOT_SET_API_KEY"})
+
+
+def test_key_env_must_be_an_api_key_name(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "jwt-secret")
+    with pytest.raises(ProviderError, match="api_key_env"):
+        OpenAiLlm({"base_url": "https://llm.example/v1", "api_key_env": "JWT_SECRET"})
 
 
 def test_missing_base_url_is_rejected():

@@ -2754,3 +2754,4 @@ Expected: `ai_gw` 日志出现 `Uvicorn running on http://0.0.0.0:8040`；`engin
 3. 机器人说话时插话，播报立即停止（`ai command type=break`）。
 4. 说「转人工」，话术播完后转到技能组在线分机。
 5. 停掉大模型密钥或填错模型，呼入后按场景降级。
+6. 与机器人连续对话超过 60 秒，通话不会被挂断（拨号计划里 `park_timeout` 为 `ROBOT_CALL_MAX_SECONDS`）。

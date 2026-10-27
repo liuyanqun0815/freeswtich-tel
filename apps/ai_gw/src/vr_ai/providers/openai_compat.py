@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -31,6 +32,7 @@ _TOOLS = [
     },
 ]
 _TOOL_ACTIONS = {"transfer_to_agent": "transfer", "hangup": "hangup"}
+_API_KEY_ENV = re.compile(r"^[A-Z][A-Z0-9_]*_API_KEY$")
 
 
 class _Endpoint:
@@ -39,6 +41,8 @@ class _Endpoint:
         if not self.base_url:
             raise ProviderError("base_url is required")
         key_env = str(config.get("api_key_env") or "")
+        if key_env and not _API_KEY_ENV.match(key_env):
+            raise ProviderError(f"api_key_env {key_env} must match {_API_KEY_ENV.pattern}")
         key = os.environ.get(key_env, "") if key_env else ""
         if key_env and not key:
             raise ProviderError(f"environment variable {key_env} is empty")

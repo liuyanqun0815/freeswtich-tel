@@ -72,6 +72,22 @@ def test_handle_ai_command_survives_send_error():
     assert transport.sent == []
 
 
+class FailingRollbackDb:
+    def __init__(self) -> None:
+        self.rollbacks = 0
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        raise RuntimeError("connection lost")
+
+
+def test_handle_ai_command_survives_failing_rollback():
+    db = FailingRollbackDb()
+    ctx = EngineCtx(entries={}, numbers={}, db=db)
+    handle_ai_command(ctx, BrokenTransport(fail_times=1), json.dumps({"type": "hangup", "call_id": "c1", "uuid": "u1"}))
+    assert db.rollbacks == 1
+
+
 def test_ai_command_loop_continues_after_failed_command():
     transport = BrokenTransport(fail_times=1)
     client = FakeRedis(

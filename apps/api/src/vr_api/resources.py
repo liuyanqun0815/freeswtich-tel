@@ -41,6 +41,7 @@ router = APIRouter(tags=["resources"])
 _ALLOWED_FALLBACKS = frozenset({"transfer", "hangup"})
 _AUDIO_EXTS = frozenset({".wav", ".mp3", ".gsm"})
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_API_KEY_ENV = re.compile(r"^[A-Z][A-Z0-9_]*_API_KEY$")
 
 
 def _sound_dir() -> Path:
@@ -830,6 +831,13 @@ def _apply_scene(row: AiScene, body: AiSceneIn) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="密钥写在 .env，配置里只填 api_key_env",
         )
+    for config in (body.asr, body.tts, body.llm):
+        key_env = config.get("api_key_env")
+        if key_env and not _API_KEY_ENV.match(str(key_env)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="api_key_env 必须是大写字母开头、以 _API_KEY 结尾的变量名",
+            )
     row.name = body.name.strip()
     row.opening = body.opening
     row.fallback = body.fallback

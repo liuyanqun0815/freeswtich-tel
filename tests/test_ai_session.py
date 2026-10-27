@@ -231,6 +231,17 @@ def test_unexpected_llm_crash_falls_back_per_scene():
     assert _run(run).commands == [("transfer", {"skill_group_id": 7})]
 
 
+def test_empty_llm_reply_falls_back_per_scene():
+    async def run():
+        harness = Harness(SceneConfig(scene_id="1", fallback="hangup"), asr=FakeAsr("查订单"), llm=FakeLlm())
+        await harness.say()
+        return harness
+
+    harness = _run(run)
+    assert harness.tts.texts == []
+    assert harness.commands == [("hangup", {})]
+
+
 def test_unexpected_tts_crash_during_opening_falls_back_per_scene():
     async def run():
         harness = Harness(SceneConfig(scene_id="1", opening="您好", fallback="hangup"), tts=CrashingTts())

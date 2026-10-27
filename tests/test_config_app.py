@@ -178,6 +178,40 @@ def test_dialplan_entry_from_seeded_phone_number_and_entry(client):
     assert '<action application="park"/>' in response.text
 
 
+def test_dialplan_robot_entry_uses_long_park_timeout(client, monkeypatch):
+    monkeypatch.delenv("ROBOT_CALL_MAX_SECONDS", raising=False)
+    client.db.add(Extension(tenant_id="t001", ext_number="1000", enabled=True))
+    client.db.add(PhoneNumber(tenant_id="t001", number="4008001234", enabled=True))
+    client.db.add(
+        Entry(
+            tenant_id="t001",
+            code="4008001234",
+            kind="robot",
+            target="scene-1",
+            enabled=True,
+        )
+    )
+    client.db.add(PhoneNumber(tenant_id="t001", number="4008005678", enabled=True))
+    client.db.commit()
+
+    def dialplan(number):
+        return client.post(
+            "/fs/xml",
+            data={"section": "dialplan", "destination_number": number},
+            auth=("fs", "secret"),
+        ).text
+
+    robot = dialplan("4008001234")
+    assert "vr_entry=robot:scene-1" in robot
+    assert "park_timeout=1800" in robot
+    extension = dialplan("1000")
+    assert "vr_entry=extension:1000" in extension
+    assert "park_timeout=20" in extension
+    did = dialplan("4008005678")
+    assert "vr_entry=did:4008005678" in did
+    assert "park_timeout=20" in did
+
+
 def test_sofia_conf_returns_only_applied_snapshot_gateways(client):
     client.db.add(
         Gateway(

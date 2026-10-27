@@ -512,23 +512,23 @@ def _stream_play_commands(event: dict[str, Any], uuid: str) -> list[FsCommand]:
     try:
         body = json.loads(event.get("_body") or "{}")
     except json.JSONDecodeError:
-        return []
+        body = None
     path = str(body.get("file") or "") if isinstance(body, dict) else ""
     if not path or not uuid:
+        logger.warning("audio_stream play ignored uuid=%s body=%s", uuid or "-", (event.get("_body") or "")[:200])
         return []
     return [_broadcast(uuid, path)]
 
 
 def _ai_command(ctx: EngineCtx, event: dict[str, Any], uuid: str) -> list[FsCommand]:
     kind = event.get("type")
-    if not uuid:
-        return []
-    if kind == "break":
+    if uuid and kind == "break":
         return commands_for_cancel(uuid)
-    if kind == "hangup":
+    if uuid and kind == "hangup":
         return [FsCommand("uuid_kill", uuid)]
-    if kind == "transfer":
+    if uuid and kind == "transfer":
         return commands_for_transfer(uuid) + _bridge_extension_or_queue(ctx, uuid, "", event.get("skill_group_id"))
+    logger.warning("ai command ignored type=%s uuid=%s", kind or "-", uuid or "-")
     return []
 
 
