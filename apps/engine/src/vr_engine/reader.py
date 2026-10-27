@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
+import threading
 import time
 from typing import Any
 from urllib.parse import unquote
 
+import redis
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from vr_common.db import get_database_url
+from vr_common.redis_keys import AI_COMMANDS
 from vr_engine.main import EngineCtx, handle_event, load_engine_ctx, run_maintenance
 
 # Design §4 / §7 event names the engine must see (plain + CUSTOM subclass).
@@ -32,6 +36,9 @@ ESL_EVENT_NAMES = (
 )
 
 logger = logging.getLogger("vr.engine.esl")
+
+# ESL 读循环与 AI 指令线程共用：handle_event 改 ctx，写 ESL 也必须串行
+_ENGINE_LOCK = threading.Lock()
 
 _SessionLocal: sessionmaker[Session] | None = None
 _ESL_TIMEOUT_SECONDS = 10
@@ -220,9 +227,8 @@ def read_loop(ctx: EngineCtx, transport: Any | None = None) -> None:
     if transport is None:
         raise RuntimeError("ESL transport is not connected")
     ctx.transport = transport
-    for cmd in run_maintenance(ctx):
-        line = f"bgapi {cmd.api} {cmd.args}".strip()
-        transport.sendall((line + "\n\n").encode("utf-8"))
+    with _ENGINE_LOCK:
+        _send_commands(transport, run_maintenance(ctx))
     pending = b""
     while True:
         raw = transport.recv(65536)
@@ -255,11 +261,53 @@ def _dispatch_event(ctx: EngineCtx, transport: Any, event: dict[str, str]) -> No
             event.get("Job-Command") or "-",
             body[:500] or "-",
         )
-    cmds = handle_event(event, ctx)
+    with _ENGINE_LOCK:
+        _send_commands(transport, handle_event(event, ctx))
+
+
+def _send_commands(transport: Any, cmds: list[Any]) -> None:
     for cmd in cmds:
         line = f"bgapi {cmd.api} {cmd.args}".strip()
         logger.info("esl send %s", line)
         transport.sendall((line + "\n\n").encode("utf-8"))
+
+
+def ai_command_event(raw: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "Event-Name": "VR_AI_CMD",
+        "Unique-ID": str(data.get("uuid") or ""),
+        "variable_vr_call_id": str(data.get("call_id") or ""),
+        "type": str(data.get("type") or ""),
+        "skill_group_id": data.get("skill_group_id"),
+    }
+
+
+def handle_ai_command(ctx: EngineCtx, transport: Any, raw: str) -> None:
+    event = ai_command_event(raw)
+    if event is None:
+        logger.warning("ai command ignored raw=%s", raw[:200])
+        return
+    logger.info("ai command type=%s uuid=%s", event["type"], event["Unique-ID"] or "-")
+    with _ENGINE_LOCK:
+        _send_commands(transport, handle_event(event, ctx))
+
+
+def ai_command_loop(ctx: EngineCtx, transport: Any, client: Any) -> None:
+    while True:
+        try:
+            item = client.brpop(AI_COMMANDS, timeout=5)
+        except Exception:
+            logger.exception("ai command poll failed")
+            time.sleep(1)
+            continue
+        if item is not None:
+            handle_ai_command(ctx, transport, item[1])
 
 
 def main() -> None:
@@ -280,6 +328,8 @@ def main() -> None:
     db = _session_factory()()
     ctx = load_engine_ctx(db)
     ctx.transport = sock
+    client = redis.from_url(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"), decode_responses=True)
+    threading.Thread(target=ai_command_loop, args=(ctx, sock, client), daemon=True, name="ai-commands").start()
     read_loop(ctx)
 
 
