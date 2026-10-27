@@ -246,15 +246,29 @@ def test_park_ivr_is_not_dialplan_and_dtmf_runs_snapshot():
     assert all(cmd.api != "transfer" for cmd in parked)
     assert ctx.sessions["c1"].ivr_version == 2
 
-    answered = handle_event(
+    # EARLY 仍不能播：WebRTC 不渲染 early media
+    early = handle_event(
         {
-            "Event-Name": "CHANNEL_ANSWER",
+            "Event-Name": "CHANNEL_CALLSTATE",
             "Unique-ID": "u1",
             "variable_vr_call_id": "c1",
+            "Channel-Call-State": "EARLY",
         },
         ctx,
     )
-    assert any(cmd.api == "uuid_broadcast" and "ivr/welcome.wav" in cmd.args for cmd in answered)
+    assert early == []
+    assert ctx.pending_playback["c1"] == "ivr/welcome.wav"
+
+    active = handle_event(
+        {
+            "Event-Name": "CHANNEL_CALLSTATE",
+            "Unique-ID": "u1",
+            "variable_vr_call_id": "c1",
+            "Channel-Call-State": "ACTIVE",
+        },
+        ctx,
+    )
+    assert any(cmd.api == "uuid_broadcast" and "ivr/welcome.wav" in cmd.args for cmd in active)
     assert "c1" not in ctx.pending_playback
 
     digits = handle_event(

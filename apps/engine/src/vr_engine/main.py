@@ -522,6 +522,35 @@ def _broadcast(uuid: str, path: str) -> FsCommand | None:
     return FsCommand("uuid_broadcast", f"{uuid} {resolved} aleg")
 
 
+def _flush_pending_playback(ctx: EngineCtx, call_id: str, uuid: str) -> list[FsCommand]:
+    """Play deferred prompt only after the channel is fully ACTIVE."""
+    if not call_id or not uuid:
+        return []
+    pending = ctx.pending_playback.pop(call_id, "")
+    if not pending:
+        return []
+    cmd = _broadcast(uuid, pending)
+    if cmd is None:
+        return []
+    logger.info(
+        "channel active playback uuid=%s call_id=%s path=%s",
+        uuid,
+        call_id,
+        pending,
+    )
+    return [cmd]
+
+
+def _callstate_is_active(event: dict[str, Any]) -> bool:
+    state = (
+        event.get("Channel-Call-State")
+        or event.get("Call-State")
+        or event.get("Channel-State")
+        or ""
+    )
+    return str(state).strip().upper() == "ACTIVE"
+
+
 def _skill_group_members(ctx: EngineCtx, skill_group_id: Any) -> list[str]:
     key = str(skill_group_id or "").strip()
     if not key:
@@ -631,7 +660,8 @@ def _enter_ivr(ctx: EngineCtx, flow_key: str, uuid: str, call_id: str) -> list[F
     cmds = [FsCommand("uuid_answer", uuid)]
     prompt = _node_prompt(snapshot, node_id)
     if prompt:
-        # 等 CHANNEL_ANSWER 再 broadcast，否则软电话侧常听不到欢迎音
+        # WebRTC 在 EARLY/Pre-Answer 阶段播 early media 前端听不到；
+        # 必须等 Channel-Call-State=ACTIVE 再建 RTP 后 broadcast。
         ctx.pending_playback[call_id] = resolve_playback_path(prompt)
     cmds.append(FsCommand("uuid_setvar", f"{uuid} vr_ivr_version={version}"))
     return cmds
@@ -777,18 +807,10 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
                 )
         else:
             logger.info("channel park uuid=%s call_id=%s skipped=already-handled", uuid or "-", call_id or "-")
-    elif event_name == "CHANNEL_ANSWER":
-        pending = ctx.pending_playback.pop(call_id, "") if call_id else ""
-        if pending and uuid:
-            cmd = _broadcast(uuid, pending)
-            if cmd is not None:
-                cmds.append(cmd)
-                logger.info(
-                    "channel answer playback uuid=%s call_id=%s path=%s",
-                    uuid,
-                    call_id or "-",
-                    pending,
-                )
+    elif event_name == "CHANNEL_CALLSTATE":
+        # ANSWER 后 WebRTC 常先到 EARLY；此时 playback 仍会 Pre-Answer，浏览器不渲染。
+        if _callstate_is_active(event):
+            cmds = _flush_pending_playback(ctx, call_id, uuid)
     elif event_name == "DTMF":
         cmds = _handle_dtmf(ctx, event, call_id, uuid)
     elif event_name == "HEARTBEAT":
@@ -844,6 +866,7 @@ def handle_event(event: dict[str, Any], ctx: EngineCtx) -> list[FsCommand]:
             "HEARTBEAT",
             "DTMF",
             "CUSTOM",
+            "CHANNEL_CALLSTATE",
         }
     ):
         row = ctx.cdr_rows.get(call_id, {})

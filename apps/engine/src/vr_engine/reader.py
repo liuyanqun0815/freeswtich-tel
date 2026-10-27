@@ -19,6 +19,7 @@ from vr_engine.main import EngineCtx, handle_event, load_engine_ctx, run_mainten
 ESL_EVENT_NAMES = (
     "CHANNEL_PARK",
     "CHANNEL_ANSWER",
+    "CHANNEL_CALLSTATE",
     "CHANNEL_HANGUP_COMPLETE",
     "BACKGROUND_JOB",
     "HEARTBEAT",
