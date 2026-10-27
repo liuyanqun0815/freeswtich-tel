@@ -9,7 +9,8 @@ from typing import Any
 
 import httpx
 
-from vr_ai.providers.base import ProviderError
+from vr_ai.audio import StreamResampler, to_wav
+from vr_ai.providers.base import AsrSession, ProviderError
 
 _TOOLS = [
     {
@@ -109,3 +110,67 @@ class OpenAiLlm:
         for name in tool_names.values():
             if name in _TOOL_ACTIONS:
                 yield {"action": _TOOL_ACTIONS[name]}
+
+
+class _BufferedAsrSession:
+    def __init__(self, asr: "OpenAiAsr") -> None:
+        self._asr = asr
+        self._pcm = bytearray()
+
+    def feed(self, pcm: bytes) -> None:
+        self._pcm.extend(pcm)
+
+    async def finish(self) -> str:
+        return await self._asr.transcribe(bytes(self._pcm))
+
+
+class OpenAiAsr:
+    def __init__(self, config: dict[str, Any], transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._endpoint = _Endpoint(config, transport)
+        self._model = str(config.get("model") or "whisper-1")
+        self._language = str(config.get("language") or "")
+
+    def open(self) -> AsrSession:
+        return _BufferedAsrSession(self)
+
+    async def transcribe(self, pcm: bytes) -> str:
+        if not pcm:
+            return ""
+        form = {"model": self._model}
+        if self._language:
+            form["language"] = self._language
+        files = {"file": ("speech.wav", to_wav(pcm), "audio/wav")}
+        url = f"{self._endpoint.base_url}/audio/transcriptions"
+        try:
+            async with self._endpoint.client() as client:
+                resp = await client.post(url, data=form, files=files, headers=self._endpoint.headers)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"asr request failed: {exc}") from exc
+        await _raise_for_status(resp, "asr")
+        return str(resp.json().get("text") or "").strip()
+
+
+class OpenAiTts:
+    def __init__(self, config: dict[str, Any], transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._endpoint = _Endpoint(config, transport)
+        self._model = str(config.get("model") or "tts-1")
+        self._voice = str(config.get("voice") or "alloy")
+        self._sample_rate = int(config.get("sample_rate") or 24000)
+
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
+        payload = {"model": self._model, "voice": self._voice, "input": text, "response_format": "pcm"}
+        resampler = StreamResampler(self._sample_rate)
+        url = f"{self._endpoint.base_url}/audio/speech"
+        try:
+            async with self._endpoint.client() as client:
+                async with client.stream("POST", url, json=payload, headers=self._endpoint.headers) as resp:
+                    await _raise_for_status(resp, "tts")
+                    async for chunk in resp.aiter_bytes():
+                        out = resampler.push(chunk)
+                        if out:
+                            yield out
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"tts request failed: {exc}") from exc
+        tail = resampler.flush()
+        if tail:
+            yield tail
