@@ -70,3 +70,40 @@ def test_bad_provider_config_uses_scene_fallback(monkeypatch):
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()
     assert commands == [("c1", "u1", "transfer", {"skill_group_id": 7})]
+
+
+def test_bad_metadata_closes_without_command(monkeypatch):
+    commands = _install(monkeypatch, _bundle(opening="您好"))
+    with TestClient(server.app).websocket_connect("/fs/stream") as ws:
+        ws.send_text("not json")
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+    assert commands == []
+
+
+def test_scene_load_error_hangs_up(monkeypatch):
+    commands = _install(monkeypatch, None)
+
+    def find_scene(scene_id: str):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(server, "find_scene", find_scene)
+    with TestClient(server.app).websocket_connect("/fs/stream") as ws:
+        ws.send_text(json.dumps({"call_id": "c1", "uuid": "u1", "scene_id": "3"}))
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+    assert commands == [("c1", "u1", "hangup", {})]
+
+
+def test_unexpected_provider_error_uses_scene_fallback(monkeypatch):
+    commands = _install(monkeypatch, _bundle(fallback="hangup"))
+
+    def build_llm(config):
+        raise ValueError("bad timeout")
+
+    monkeypatch.setattr(server, "build_llm", build_llm)
+    with TestClient(server.app).websocket_connect("/fs/stream") as ws:
+        ws.send_text(json.dumps({"call_id": "c1", "uuid": "u1", "scene_id": "3"}))
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+    assert commands == [("c1", "u1", "hangup", {})]
