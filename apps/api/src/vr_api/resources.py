@@ -134,9 +134,14 @@ class BlacklistIn(BaseModel):
 
 class AiSceneIn(BaseModel):
     name: str
-    ws_url: Optional[str] = None
-    fallback: str = "transfer"
     opening: str = ""
+    fallback: str = "transfer"
+    system_prompt: str = ""
+    transfer_skill_group_id: Optional[int] = None
+    asr: dict[str, Any] = Field(default_factory=dict)
+    tts: dict[str, Any] = Field(default_factory=dict)
+    llm: dict[str, Any] = Field(default_factory=dict)
+    ws_url: Optional[str] = None
     tenant_id: Optional[str] = None
 
 
@@ -801,15 +806,55 @@ def create_blacklist(
 # ---- AI scenes ----
 
 
+def _json_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _scene_out(row: AiScene) -> dict[str, Any]:
+    item = _row_dict(row, "name", "ws_url", "fallback", "opening", "system_prompt", "transfer_skill_group_id")
+    item["asr"] = _json_dict(row.asr_json)
+    item["tts"] = _json_dict(row.tts_json)
+    item["llm"] = _json_dict(row.llm_json)
+    return item
+
+
+def _apply_scene(row: AiScene, body: AiSceneIn) -> None:
+    if body.fallback not in _ALLOWED_FALLBACKS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="fallback must be transfer or hangup")
+    if any("api_key" in config for config in (body.asr, body.tts, body.llm)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="密钥写在 .env，配置里只填 api_key_env",
+        )
+    row.name = body.name.strip()
+    row.opening = body.opening
+    row.fallback = body.fallback
+    row.system_prompt = body.system_prompt
+    row.transfer_skill_group_id = body.transfer_skill_group_id
+    row.ws_url = body.ws_url
+    row.asr_json = json.dumps(body.asr, ensure_ascii=False)
+    row.tts_json = json.dumps(body.tts, ensure_ascii=False)
+    row.llm_json = json.dumps(body.llm, ensure_ascii=False)
+
+
+def _scene_or_404(db: Session, scene_id: int) -> AiScene:
+    row = db.get(AiScene, scene_id)
+    if row is None or row.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI 场景不存在")
+    return row
+
+
 @router.get("/ai-scenes")
 def list_ai_scenes(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
-    rows = db.scalars(select(AiScene).where(AiScene.tenant_id == DEFAULT_TENANT)).all()
-    return {
-        "items": [_row_dict(r, "name", "ws_url", "fallback", "opening") for r in rows]
-    }
+    rows = db.scalars(select(AiScene).where(AiScene.tenant_id == DEFAULT_TENANT).order_by(AiScene.id)).all()
+    return {"items": [_scene_out(r) for r in rows]}
 
 
 @router.post("/ai-scenes")
@@ -818,17 +863,36 @@ def create_ai_scene(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)],
 ) -> dict:
-    if body.fallback not in _ALLOWED_FALLBACKS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="fallback must be transfer or hangup",
-        )
-    data = _force_tenant(body.model_dump())
-    row = AiScene(**data)
+    row = AiScene(tenant_id=DEFAULT_TENANT)
+    _apply_scene(row, body)
     db.add(row)
     db.commit()
     db.refresh(row)
-    return _row_dict(row, "name", "ws_url", "fallback", "opening")
+    return _scene_out(row)
+
+
+@router.put("/ai-scenes/{scene_id}")
+def update_ai_scene(
+    scene_id: int,
+    body: AiSceneIn,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> dict:
+    row = _scene_or_404(db, scene_id)
+    _apply_scene(row, body)
+    db.commit()
+    db.refresh(row)
+    return _scene_out(row)
+
+
+@router.delete("/ai-scenes/{scene_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_ai_scene(
+    scene_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin)],
+) -> None:
+    db.delete(_scene_or_404(db, scene_id))
+    db.commit()
 
 
 # ---- FS nodes ----

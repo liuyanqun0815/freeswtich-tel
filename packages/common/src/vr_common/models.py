@@ -184,6 +184,11 @@ class AiScene(Base, TenantScoped):
     ws_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     fallback: Mapped[str] = mapped_column(String(16), nullable=False, default="transfer")
     opening: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    transfer_skill_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    asr_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    tts_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    llm_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
 class FsNode(Base, TenantScoped):
