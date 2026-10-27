@@ -552,6 +552,7 @@ function entryLabel(
     extensions: EntryOptionRow[];
     skillGroups: EntryOptionRow[];
     ivrFlows: EntryOptionRow[];
+    aiScenes: EntryOptionRow[];
   },
 ): string {
   if (!row.entry_kind || !row.entry_target) {
@@ -574,6 +575,11 @@ function entryLabel(
     if (flow?.name) {
       target = `${flow.id} ${flow.name}`;
     }
+  } else if (row.entry_kind === "robot") {
+    const scene = lookups.aiScenes.find((item) => String(item.id) === row.entry_target);
+    if (scene?.name) {
+      target = scene.name;
+    }
   }
   return `${kind} / ${target}`;
 }
@@ -584,6 +590,7 @@ export function GatewaysNumbersPage() {
   const [extensions, setExtensions] = useState<EntryOptionRow[]>([]);
   const [skillGroups, setSkillGroups] = useState<EntryOptionRow[]>([]);
   const [ivrFlows, setIvrFlows] = useState<EntryOptionRow[]>([]);
+  const [aiScenes, setAiScenes] = useState<EntryOptionRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [numberOpen, setNumberOpen] = useState(false);
   const [gatewayOpen, setGatewayOpen] = useState(false);
@@ -599,16 +606,18 @@ export function GatewaysNumbersPage() {
       setExtensions([]);
       setSkillGroups([]);
       setIvrFlows([]);
+      setAiScenes([]);
       return;
     }
     setLoading(true);
     try {
-      const [numberResp, gatewayResp, extResp, sgResp, ivrResp] = await Promise.all([
+      const [numberResp, gatewayResp, extResp, sgResp, ivrResp, sceneResp] = await Promise.all([
         api("/numbers"),
         api("/gateways"),
         api("/extensions"),
         api("/skill-groups"),
         api("/ivr"),
+        api("/ai-scenes"),
       ]);
       if (numberResp.ok) {
         const body = (await numberResp.json()) as { items: NumberRow[] };
@@ -629,6 +638,10 @@ export function GatewaysNumbersPage() {
       if (ivrResp.ok) {
         const body = (await ivrResp.json()) as { items: EntryOptionRow[] };
         setIvrFlows(body.items ?? []);
+      }
+      if (sceneResp.ok) {
+        const body = (await sceneResp.json()) as { items: EntryOptionRow[] };
+        setAiScenes(body.items ?? []);
       }
     } finally {
       setLoading(false);
@@ -792,7 +805,7 @@ export function GatewaysNumbersPage() {
           {
             title: "入口",
             render: (_: unknown, row: NumberRow) =>
-              entryLabel(row, { extensions, skillGroups, ivrFlows }),
+              entryLabel(row, { extensions, skillGroups, ivrFlows, aiScenes }),
           },
           {
             title: "启用",
@@ -977,10 +990,15 @@ export function GatewaysNumbersPage() {
                 <Form.Item
                   name="entry_target"
                   label="入口目标"
-                  rules={[{ required: true, message: "请填写目标" }]}
-                  extra="机器人场景后续接入，当前先手填目标标识"
+                  rules={[{ required: true, message: "请选择 AI 场景" }]}
                 >
-                  <Input placeholder="机器人场景标识" />
+                  <Select
+                    placeholder="选择 AI 场景"
+                    options={aiScenes.map((scene) => ({
+                      value: String(scene.id),
+                      label: `${scene.id} ${scene.name}`,
+                    }))}
+                  />
                 </Form.Item>
               );
             }}
@@ -1583,35 +1601,264 @@ export function BlacklistPage() {
   );
 }
 
-export function AiScenesPage() {
+type ProviderConfig = {
+  vendor?: string;
+  base_url?: string;
+  api_key_env?: string;
+  model?: string;
+  language?: string;
+  voice?: string;
+  sample_rate?: number;
+};
+
+type AiSceneRow = {
+  id: number;
+  name: string;
+  opening: string;
+  fallback: string;
+  system_prompt: string;
+  transfer_skill_group_id: number | null;
+  asr: ProviderConfig;
+  tts: ProviderConfig;
+  llm: ProviderConfig;
+};
+
+type AiSceneForm = Omit<AiSceneRow, "id" | "transfer_skill_group_id"> & {
+  transfer_skill_group_id?: number;
+};
+
+const FALLBACK_OPTIONS = [
+  { value: "transfer", label: "转人工" },
+  { value: "hangup", label: "挂机" },
+];
+
+function providerBody(config: ProviderConfig = {}): ProviderConfig {
+  const text = (value?: string) => value?.trim() || undefined;
+  return {
+    vendor: "openai",
+    base_url: text(config.base_url),
+    api_key_env: text(config.api_key_env),
+    model: text(config.model),
+    language: text(config.language),
+    voice: text(config.voice),
+    sample_rate: config.sample_rate ? Number(config.sample_rate) : undefined,
+  };
+}
+
+function ProviderFields({
+  name,
+  title,
+  children,
+}: {
+  name: "asr" | "tts" | "llm";
+  title: string;
+  children?: ReactNode;
+}) {
   return (
-    <PageShell
-      title="AI 场景"
-      filterItems={
-        <Form.Item label="场景">
-          <Input placeholder="场景" />
-        </Form.Item>
+    <>
+      <Typography.Title level={5}>{title}</Typography.Title>
+      <Form.Item
+        name={[name, "base_url"]}
+        label="接口地址"
+        rules={[{ required: true, message: "请填写接口地址" }]}
+      >
+        <Input placeholder="https://api.example.com/v1" />
+      </Form.Item>
+      <Form.Item name={[name, "api_key_env"]} label="密钥环境变量名" extra="密钥写在 .env，这里只填变量名">
+        <Input placeholder="DEEPSEEK_API_KEY" />
+      </Form.Item>
+      <Form.Item name={[name, "model"]} label="模型" rules={[{ required: true, message: "请填写模型" }]}>
+        <Input />
+      </Form.Item>
+      {children}
+    </>
+  );
+}
+
+export function AiScenesPage() {
+  const [items, setItems] = useState<AiSceneRow[]>([]);
+  const [skillGroups, setSkillGroups] = useState<{ id: number; name: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<AiSceneRow | null>(null);
+  const [form] = Form.useForm<AiSceneForm>();
+
+  const load = useCallback(async () => {
+    if (!getToken()) {
+      setItems([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [sceneResp, sgResp] = await Promise.all([api("/ai-scenes"), api("/skill-groups")]);
+      if (sceneResp.ok) {
+        const body = (await sceneResp.json()) as { items: AiSceneRow[] };
+        setItems(body.items ?? []);
       }
-      columns={[
-        { title: "名称", dataIndex: "name", key: "name" },
-        { title: "WebSocket", dataIndex: "ws_url", key: "ws_url" },
-        { title: "降级", dataIndex: "fallback", key: "fallback" },
-        { title: "开场白", dataIndex: "opening", key: "opening" },
-      ]}
-      extra={
-        <Form layout="inline" style={{ marginBottom: 16 }}>
-          <Form.Item label="降级方式">
+      if (sgResp.ok) {
+        const body = (await sgResp.json()) as { items: { id: number; name: string }[] };
+        setSkillGroups(body.items ?? []);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function openCreate() {
+    setEditing(null);
+    form.setFieldsValue({
+      name: "",
+      opening: "",
+      fallback: "transfer",
+      system_prompt: "",
+      transfer_skill_group_id: undefined,
+      asr: { language: "zh" },
+      tts: { sample_rate: 24000 },
+      llm: {},
+    });
+    setOpen(true);
+  }
+
+  function openEdit(row: AiSceneRow) {
+    setEditing(row);
+    form.setFieldsValue({ ...row, transfer_skill_group_id: row.transfer_skill_group_id ?? undefined });
+    setOpen(true);
+  }
+
+  async function onSubmit(values: AiSceneForm) {
+    const body = {
+      name: values.name.trim(),
+      opening: values.opening?.trim() ?? "",
+      fallback: values.fallback,
+      system_prompt: values.system_prompt?.trim() ?? "",
+      transfer_skill_group_id: values.transfer_skill_group_id ?? null,
+      asr: providerBody(values.asr),
+      tts: providerBody(values.tts),
+      llm: providerBody(values.llm),
+    };
+    const resp = editing
+      ? await api(`/ai-scenes/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await api("/ai-scenes", { method: "POST", body: JSON.stringify(body) });
+    if (!resp.ok) {
+      message.error(editing ? "保存失败" : "新增失败");
+      return;
+    }
+    message.success(editing ? "已保存" : "已新增");
+    setOpen(false);
+    await load();
+  }
+
+  async function onDelete(row: AiSceneRow) {
+    const resp = await api(`/ai-scenes/${row.id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      message.error("删除失败");
+      return;
+    }
+    message.success("已删除");
+    await load();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <Typography.Title level={4} style={{ marginTop: 0 }}>
+          AI 场景
+        </Typography.Title>
+        <Button type="primary" onClick={openCreate}>
+          新增场景
+        </Button>
+      </div>
+      <Table<AiSceneRow>
+        style={{ marginTop: 12 }}
+        size="small"
+        bordered
+        rowKey="id"
+        loading={loading}
+        dataSource={items}
+        locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
+        pagination={false}
+        columns={[
+          { title: "ID", dataIndex: "id", width: 60 },
+          { title: "名称", dataIndex: "name" },
+          { title: "开场白", dataIndex: "opening", ellipsis: true },
+          { title: "对话模型", render: (_: unknown, row: AiSceneRow) => row.llm?.model || "—" },
+          {
+            title: "降级",
+            dataIndex: "fallback",
+            render: (value: string) => FALLBACK_OPTIONS.find((item) => item.value === value)?.label ?? value,
+          },
+          {
+            title: "转人工技能组",
+            dataIndex: "transfer_skill_group_id",
+            render: (value: number | null) => skillGroups.find((sg) => sg.id === value)?.name ?? "—",
+          },
+          {
+            title: "操作",
+            width: 140,
+            render: (_: unknown, row: AiSceneRow) => (
+              <Space>
+                <Button type="link" size="small" onClick={() => openEdit(row)}>
+                  编辑
+                </Button>
+                <Popconfirm title="确认删除该场景？" onConfirm={() => onDelete(row)}>
+                  <Button type="link" size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]}
+      />
+      <Modal
+        title={editing ? "编辑场景" : "新增场景"}
+        open={open}
+        width={720}
+        onCancel={() => setOpen(false)}
+        onOk={() => form.submit()}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical" onFinish={(values) => void onSubmit(values)}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+            <Input placeholder="售后机器人" />
+          </Form.Item>
+          <Form.Item name="opening" label="开场白" extra="不含「智能助理」时会自动在前面加「我是智能助理。」">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item name="system_prompt" label="系统提示词">
+            <Input.TextArea rows={4} placeholder="你是某某公司的电话客服，回答简短口语化" />
+          </Form.Item>
+          <Form.Item name="fallback" label="失败降级" rules={[{ required: true, message: "请选择降级方式" }]}>
+            <Select options={FALLBACK_OPTIONS} />
+          </Form.Item>
+          <Form.Item name="transfer_skill_group_id" label="转人工技能组">
             <Select
-              style={{ width: 140 }}
-              options={[
-                { value: "transfer", label: "transfer" },
-                { value: "hangup", label: "hangup" },
-              ]}
+              allowClear
+              placeholder="选择技能组"
+              options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
             />
           </Form.Item>
+          <ProviderFields name="asr" title="语音识别">
+            <Form.Item name={["asr", "language"]} label="语言">
+              <Input placeholder="zh" />
+            </Form.Item>
+          </ProviderFields>
+          <ProviderFields name="tts" title="语音合成">
+            <Form.Item name={["tts", "voice"]} label="音色">
+              <Input placeholder="alloy" />
+            </Form.Item>
+            <Form.Item name={["tts", "sample_rate"]} label="输出采样率">
+              <Input type="number" placeholder="24000" />
+            </Form.Item>
+          </ProviderFields>
+          <ProviderFields name="llm" title="大模型" />
         </Form>
-      }
-    />
+      </Modal>
+    </div>
   );
 }
 

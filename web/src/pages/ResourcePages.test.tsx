@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { MENU_LABELS } from "../menu";
 import {
@@ -66,4 +66,13 @@ test("blacklist page uses table and filter form", () => {
   expect(screen.getByRole("button", { name: /查\s*询/ })).toBeInTheDocument();
   expect(screen.getAllByText("号码").length).toBeGreaterThanOrEqual(1);
   expect(screen.getByRole("columnheader", { name: "原因" })).toBeInTheDocument();
+});
+
+test("ai scenes page opens a form with recognition, synthesis and llm sections", async () => {
+  render(<AiScenesPage />);
+  fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
+  expect(await screen.findByText("语音识别")).toBeInTheDocument();
+  expect(screen.getByText("语音合成")).toBeInTheDocument();
+  expect(screen.getByText("大模型")).toBeInTheDocument();
+  expect(screen.getAllByText("密钥环境变量名").length).toBe(3);
 });
