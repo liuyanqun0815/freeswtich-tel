@@ -176,9 +176,9 @@ class BotSession:
         self._speaking_until = max(self._clock(), self._speaking_until) + duration_seconds(pcm)
 
     async def _finish(self, action: str) -> None:
+        self.finished = True
         wait = self._speaking_until - self._clock()
         if wait > 0:
             await self._sleep(wait)
         kind, extra = command_for(self._scene, action)
-        self.finished = True
         await self._send_command(kind, extra)

@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 
 from vr_ai.audio import Endpointer
 from vr_ai.providers.base import ProviderError
@@ -79,6 +80,7 @@ class Harness:
         self.sleeps: list[float] = []
         self.tts = tts or FakeTts()
         self.llm = llm or FakeLlm()
+        self.on_sleep: Callable[[], Awaitable[None]] | None = None
 
         async def send_audio(wav: bytes) -> None:
             self.audio.append(wav)
@@ -88,6 +90,8 @@ class Harness:
 
         async def sleep(seconds: float) -> None:
             self.sleeps.append(seconds)
+            if self.on_sleep is not None:
+                await self.on_sleep()
 
         self.session = BotSession(
             scene=scene,
@@ -175,6 +179,20 @@ def test_transfer_waits_for_playback_then_hands_over():
     assert harness.sleeps == [1.0]
     assert harness.commands == [("transfer", {"skill_group_id": 7})]
     assert harness.session.finished
+
+
+def test_speaking_during_farewell_does_not_cancel_transfer():
+    async def run():
+        harness = Harness(
+            SceneConfig(scene_id="1", transfer_skill_group_id=7),
+            asr=FakeAsr("转人工"),
+            llm=FakeLlm({"text": "正在为您转接。"}, {"action": "transfer"}),
+        )
+        harness.on_sleep = lambda: harness.session.on_audio(VOICED * 10)
+        await harness.say()
+        return harness
+
+    assert _run(run).commands == [("transfer", {"skill_group_id": 7})]
 
 
 def test_provider_error_falls_back_per_scene():
