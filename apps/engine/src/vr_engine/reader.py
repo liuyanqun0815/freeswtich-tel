@@ -295,7 +295,12 @@ def handle_ai_command(ctx: EngineCtx, transport: Any, raw: str) -> None:
         return
     logger.info("ai command type=%s uuid=%s", event["type"], event["Unique-ID"] or "-")
     with _ENGINE_LOCK:
-        _send_commands(transport, handle_event(event, ctx))
+        try:
+            _send_commands(transport, handle_event(event, ctx))
+        except Exception:
+            logger.exception("ai command failed raw=%s", raw[:200])
+            if ctx.db is not None:
+                ctx.db.rollback()
 
 
 def ai_command_loop(ctx: EngineCtx, transport: Any, client: Any) -> None:
