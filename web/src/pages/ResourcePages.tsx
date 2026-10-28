@@ -1609,6 +1609,9 @@ type ProviderConfig = {
   language?: string;
   voice?: string;
   sample_rate?: number;
+  engine_model_type?: string;
+  api_key?: string;
+  api_key_set?: boolean;
 };
 
 type AiSceneRow = {
@@ -1633,8 +1636,16 @@ const FALLBACK_OPTIONS = [
   { value: "hangup", label: "挂机" },
 ];
 
+const ASR_VENDOR_OPTIONS = [
+  { value: "openai", label: "OpenAI 兼容" },
+  { value: "tencent", label: "腾讯云实时识别" },
+];
+
 function providerBody(config: ProviderConfig = {}): ProviderConfig {
   const text = (value?: string) => value?.trim() || undefined;
+  if (config.vendor === "tencent") {
+    return { vendor: "tencent", engine_model_type: text(config.engine_model_type) };
+  }
   return {
     vendor: "openai",
     base_url: text(config.base_url),
@@ -1646,18 +1657,61 @@ function providerBody(config: ProviderConfig = {}): ProviderConfig {
   };
 }
 
+function llmBody(config: ProviderConfig = {}): ProviderConfig {
+  const { api_key_env: _ignored, ...body } = providerBody(config);
+  return { ...body, api_key: config.api_key?.trim() || undefined };
+}
+
+function LlmFields({ keySet }: { keySet: boolean }) {
+  return (
+    <>
+      <Typography.Title level={5}>大模型</Typography.Title>
+      <Form.Item
+        name={["llm", "base_url"]}
+        label="接口地址"
+        rules={[{ required: true, message: "请填写接口地址" }]}
+        extra="OpenAI 兼容格式，例如 https://api.deepseek.com/v1"
+      >
+        <Input placeholder="https://api.example.com/v1" />
+      </Form.Item>
+      <Form.Item name={["llm", "api_key"]} label="API Key" extra="保存后不再显示；改了接口地址需要重新填写">
+        <Input.Password
+          autoComplete="new-password"
+          placeholder={keySet ? "已设置，留空则不修改" : "sk-..."}
+        />
+      </Form.Item>
+      <Form.Item name={["llm", "model"]} label="模型" rules={[{ required: true, message: "请填写模型" }]}>
+        <Input placeholder="deepseek-chat" />
+      </Form.Item>
+    </>
+  );
+}
+
+function TencentAsrFields() {
+  return (
+    <>
+      <Typography.Paragraph type="secondary">
+        AppId、SecretId、SecretKey 写在服务器 .env 的 TENCENT_APP_ID、TENCENT_SECRET_ID、TENCENT_SECRET_KEY
+      </Typography.Paragraph>
+      <Form.Item name={["asr", "engine_model_type"]} label="识别模型" extra="电话音频用 8k_zh">
+        <Input placeholder="8k_zh" />
+      </Form.Item>
+    </>
+  );
+}
+
 function ProviderFields({
   name,
   title,
   children,
 }: {
   name: "asr" | "tts" | "llm";
-  title: string;
+  title?: string;
   children?: ReactNode;
 }) {
   return (
     <>
-      <Typography.Title level={5}>{title}</Typography.Title>
+      {title ? <Typography.Title level={5}>{title}</Typography.Title> : null}
       <Form.Item
         name={[name, "base_url"]}
         label="接口地址"
@@ -1718,7 +1772,7 @@ export function AiScenesPage() {
       fallback: "transfer",
       system_prompt: "",
       transfer_skill_group_id: undefined,
-      asr: { language: "zh" },
+      asr: { vendor: "openai", language: "zh" },
       tts: { sample_rate: 24000 },
       llm: {},
     });
@@ -1742,7 +1796,7 @@ export function AiScenesPage() {
       transfer_skill_group_id: values.transfer_skill_group_id ?? null,
       asr: providerBody(values.asr),
       tts: providerBody(values.tts),
-      llm: providerBody(values.llm),
+      llm: llmBody(values.llm),
     };
     const resp = editing
       ? await api(`/ai-scenes/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
@@ -1846,11 +1900,23 @@ export function AiScenesPage() {
               options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
             />
           </Form.Item>
-          <ProviderFields name="asr" title="语音识别">
-            <Form.Item name={["asr", "language"]} label="语言">
-              <Input placeholder="zh" />
-            </Form.Item>
-          </ProviderFields>
+          <Typography.Title level={5}>语音识别</Typography.Title>
+          <Form.Item name={["asr", "vendor"]} label="厂商">
+            <Select options={ASR_VENDOR_OPTIONS} />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, next) => prev.asr?.vendor !== next.asr?.vendor}>
+            {() =>
+              form.getFieldValue(["asr", "vendor"]) === "tencent" ? (
+                <TencentAsrFields />
+              ) : (
+                <ProviderFields name="asr">
+                  <Form.Item name={["asr", "language"]} label="语言">
+                    <Input placeholder="zh" />
+                  </Form.Item>
+                </ProviderFields>
+              )
+            }
+          </Form.Item>
           <ProviderFields name="tts" title="语音合成">
             <Form.Item name={["tts", "voice"]} label="音色">
               <Input placeholder="alloy" />
@@ -1859,7 +1925,7 @@ export function AiScenesPage() {
               <Input type="number" placeholder="24000" />
             </Form.Item>
           </ProviderFields>
-          <ProviderFields name="llm" title="大模型" />
+          <LlmFields keySet={Boolean(editing?.llm?.api_key_set)} />
         </Form>
       </Modal>
     </div>

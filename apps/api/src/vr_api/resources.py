@@ -41,7 +41,8 @@ router = APIRouter(tags=["resources"])
 _ALLOWED_FALLBACKS = frozenset({"transfer", "hangup"})
 _AUDIO_EXTS = frozenset({".wav", ".mp3", ".gsm"})
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-_API_KEY_ENV = re.compile(r"^[A-Z][A-Z0-9_]*_API_KEY$")
+_SECRET_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*_API_KEY$")
+_PLAIN_SECRET_FIELDS = ("api_key", "secret_id", "secret_key")
 
 
 def _sound_dir() -> Path:
@@ -819,25 +820,40 @@ def _scene_out(row: AiScene) -> dict[str, Any]:
     item = _row_dict(row, "name", "ws_url", "fallback", "opening", "system_prompt", "transfer_skill_group_id")
     item["asr"] = _json_dict(row.asr_json)
     item["tts"] = _json_dict(row.tts_json)
-    item["llm"] = _json_dict(row.llm_json)
+    llm = _json_dict(row.llm_json)
+    llm["api_key_set"] = bool(llm.pop("api_key", None))
+    item["llm"] = llm
     return item
+
+
+def _merge_llm_key(llm: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    merged = {k: v for k, v in llm.items() if k not in {"api_key", "api_key_set"}}
+    key = str(llm.get("api_key") or "").strip()
+    if key:
+        merged["api_key"] = key
+    elif previous.get("api_key") and previous.get("base_url") == merged.get("base_url"):
+        # 地址改了就不沿用旧 Key，防止把已保存的 Key 发到新地址
+        merged["api_key"] = previous["api_key"]
+    return merged
 
 
 def _apply_scene(row: AiScene, body: AiSceneIn) -> None:
     if body.fallback not in _ALLOWED_FALLBACKS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="fallback must be transfer or hangup")
-    if any("api_key" in config for config in (body.asr, body.tts, body.llm)):
+    configs = (body.asr, body.tts, body.llm)
+    speech_configs = (body.asr, body.tts)
+    if any(field in config for config in speech_configs for field in _PLAIN_SECRET_FIELDS):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="密钥写在 .env，配置里只填 api_key_env",
+            detail="识别和合成的密钥写在 .env，配置里只填 *_env 变量名",
         )
-    for config in (body.asr, body.tts, body.llm):
-        key_env = config.get("api_key_env")
-        if key_env and not _API_KEY_ENV.match(str(key_env)):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="api_key_env 必须是大写字母开头、以 _API_KEY 结尾的变量名",
-            )
+    for config in configs:
+        for field, value in config.items():
+            if field.endswith("_env") and value and not _SECRET_ENV_NAME.match(str(value)):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"{field} 必须是大写字母开头、以 _API_KEY 结尾的变量名",
+                )
     row.name = body.name.strip()
     row.opening = body.opening
     row.fallback = body.fallback
@@ -846,7 +862,7 @@ def _apply_scene(row: AiScene, body: AiSceneIn) -> None:
     row.ws_url = body.ws_url
     row.asr_json = json.dumps(body.asr, ensure_ascii=False)
     row.tts_json = json.dumps(body.tts, ensure_ascii=False)
-    row.llm_json = json.dumps(body.llm, ensure_ascii=False)
+    row.llm_json = json.dumps(_merge_llm_key(body.llm, _json_dict(row.llm_json)), ensure_ascii=False)
 
 
 def _scene_or_404(db: Session, scene_id: int) -> AiScene:

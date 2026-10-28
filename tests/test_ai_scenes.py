@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -6,8 +7,9 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from fastapi.testclient import TestClient
 
-from support import seed_user
+from support import get_test_session, seed_user
 from vr_api.main import app
+from vr_common.models import AiScene
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "20261027_0002_ai_scene_providers.py"
 
@@ -53,7 +55,7 @@ def test_ai_scene_crud_with_provider_configs():
     assert updated.status_code == 200
     assert updated.json()["fallback"] == "hangup"
     assert updated.json()["tts"]["voice"] == "alloy"
-    assert updated.json()["llm"] == {}
+    assert updated.json()["llm"] == {"api_key_set": False}
 
     listed = client.get("/ai-scenes", headers=headers).json()["items"]
     assert [item["name"] for item in listed] == ["售后"]
@@ -65,8 +67,9 @@ def test_ai_scene_crud_with_provider_configs():
 def test_ai_scene_rejects_plain_api_key_and_bad_fallback():
     client = TestClient(app)
     headers = _admin_headers(client)
-    with_key = client.post("/ai-scenes", headers=headers, json={"name": "x", "llm": {"api_key": "sk-123"}})
-    assert with_key.status_code == 400
+    for config in ("asr", "tts"):
+        with_key = client.post("/ai-scenes", headers=headers, json={"name": "x", config: {"api_key": "sk-123"}})
+        assert with_key.status_code == 400
     bad_fallback = client.post("/ai-scenes", headers=headers, json={"name": "x", "fallback": "retry"})
     assert bad_fallback.status_code == 400
 
@@ -80,6 +83,58 @@ def test_ai_scene_rejects_api_key_env_not_ending_with_api_key():
         assert resp.json()["detail"] == "api_key_env 必须是大写字母开头、以 _API_KEY 结尾的变量名"
     lower = client.post("/ai-scenes", headers=headers, json={"name": "x", "llm": {"api_key_env": "deepseek_API_KEY"}})
     assert lower.status_code == 400
+
+
+def _stored_llm(scene_id: int) -> dict:
+    db = next(get_test_session())
+    try:
+        return json.loads(db.get(AiScene, scene_id).llm_json)
+    finally:
+        db.close()
+
+
+def test_llm_api_key_is_write_only_and_kept_until_base_url_changes():
+    client = TestClient(app)
+    headers = _admin_headers(client)
+    llm = {"vendor": "openai", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}
+    created = client.post("/ai-scenes", headers=headers, json={"name": "x", "llm": {**llm, "api_key": "sk-secret"}})
+    assert created.status_code == 200
+    scene = created.json()
+    assert "api_key" not in scene["llm"]
+    assert scene["llm"]["api_key_set"] is True
+    assert _stored_llm(scene["id"])["api_key"] == "sk-secret"
+    assert "sk-secret" not in client.get("/ai-scenes", headers=headers).text
+
+    kept = client.put(f"/ai-scenes/{scene['id']}", headers=headers, json={"name": "x", "llm": {**llm, "api_key": ""}})
+    assert kept.json()["llm"]["api_key_set"] is True
+    assert _stored_llm(scene["id"])["api_key"] == "sk-secret"
+
+    replaced = client.put(
+        f"/ai-scenes/{scene['id']}", headers=headers, json={"name": "x", "llm": {**llm, "api_key": "sk-new"}}
+    )
+    assert replaced.json()["llm"]["api_key_set"] is True
+    assert _stored_llm(scene["id"])["api_key"] == "sk-new"
+
+    moved = client.put(
+        f"/ai-scenes/{scene['id']}",
+        headers=headers,
+        json={"name": "x", "llm": {**llm, "base_url": "https://other.example/v1"}},
+    )
+    assert moved.json()["llm"]["api_key_set"] is False
+    assert "api_key" not in _stored_llm(scene["id"])
+
+
+def test_ai_scene_tencent_asr_keeps_credentials_out_of_the_scene():
+    client = TestClient(app)
+    headers = _admin_headers(client)
+    tencent = {"vendor": "tencent", "engine_model_type": "8k_zh"}
+    ok = client.post("/ai-scenes", headers=headers, json={"name": "x", "asr": tencent})
+    assert ok.status_code == 200
+    assert ok.json()["asr"] == tencent
+
+    for field in ("secret_id", "secret_key"):
+        plain = client.post("/ai-scenes", headers=headers, json={"name": "x", "asr": {**tencent, field: "abc"}})
+        assert plain.status_code == 400
 
 
 def test_migration_adds_columns_and_is_rerunnable():

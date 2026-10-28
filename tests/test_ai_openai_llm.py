@@ -111,6 +111,21 @@ def test_missing_key_env_is_rejected(monkeypatch):
         OpenAiLlm({"base_url": "https://llm.example/v1", "api_key_env": "NOT_SET_API_KEY"})
 
 
+def test_inline_api_key_is_sent_as_bearer_token():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, content=_sse({"choices": [{"delta": {"content": "好"}}]}))
+
+    llm = OpenAiLlm(
+        {"base_url": "https://llm.example/v1", "api_key": "sk-inline", "model": "m1"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert _collect(llm, []) == [{"text": "好"}]
+    assert seen["auth"] == "Bearer sk-inline"
+
+
 def test_key_env_must_be_an_api_key_name(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "jwt-secret")
     with pytest.raises(ProviderError, match="api_key_env"):
