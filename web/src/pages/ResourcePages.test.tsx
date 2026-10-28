@@ -74,8 +74,12 @@ test("ai scenes page opens a form with recognition, synthesis and llm sections",
   expect(await screen.findByText("语音识别")).toBeInTheDocument();
   expect(screen.getByText("语音合成")).toBeInTheDocument();
   expect(screen.getByText("大模型")).toBeInTheDocument();
-  expect(screen.getAllByText("密钥环境变量名").length).toBe(2);
+  expect(screen.queryByText("密钥环境变量名")).not.toBeInTheDocument();
+  expect(screen.getByText(/VOLC_APP_ID/)).toBeInTheDocument();
   expect(screen.getByText("API Key")).toBeInTheDocument();
+  expect(screen.queryByText("OpenAI 兼容")).not.toBeInTheDocument();
+  expect(screen.getByText(/TENCENT_APP_ID/)).toBeInTheDocument();
+  expect(screen.getByPlaceholderText("8k_zh")).toHaveValue("8k_zh");
 });
 
 test("ai scenes form sends a typed llm api key and keeps it hidden otherwise", async () => {
@@ -88,7 +92,7 @@ test("ai scenes form sends a typed llm api key and keeps it hidden otherwise", a
     system_prompt: "",
     transfer_skill_group_id: null,
     asr: { vendor: "openai", base_url: "https://asr.example/v1", model: "asr-1" },
-    tts: { vendor: "openai", base_url: "https://tts.example/v1", model: "tts-1" },
+    tts: { vendor: "volcengine", voice_type: "zh_female_shuangkuaisisi_moon_bigtts" },
     llm: { vendor: "openai", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat", api_key_set: true },
   };
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
@@ -133,7 +137,7 @@ test("ai scenes create form does not keep values from a previously edited scene"
     system_prompt: "",
     transfer_skill_group_id: null,
     asr: { base_url: "https://asr.example/v1", model: "asr-1", language: "zh" },
-    tts: { base_url: "https://tts.example/v1", model: "tts-1", voice: "anna", sample_rate: 24000 },
+    tts: { vendor: "volcengine", voice_type: "anna" },
     llm: { base_url: "https://llm.example/v1", model: "llm-1" },
   };
   const fetchMock = vi.fn(async (url: string) => ({
@@ -146,10 +150,10 @@ test("ai scenes create form does not keep values from a previously edited scene"
   try {
     render(<AiScenesPage />);
     fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
-    expect(await screen.findByPlaceholderText("alloy")).toHaveValue("anna");
+    expect(await screen.findByPlaceholderText("zh_female_shuangkuaisisi_moon_bigtts")).toHaveValue("anna");
     fireEvent.click(screen.getByRole("button", { name: /^(取\s*消|Cancel)$/ }));
     fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
-    await waitFor(() => expect(screen.getByPlaceholderText("alloy")).toHaveValue(""));
+    await waitFor(() => expect(screen.getByPlaceholderText("zh_female_shuangkuaisisi_moon_bigtts")).toHaveValue(""));
   } finally {
     sessionStorage.removeItem("vr_access_token");
     vi.unstubAllGlobals();
@@ -166,7 +170,7 @@ test("ai scenes form shows tencent asr fields and keeps the vendor on save", asy
     system_prompt: "",
     transfer_skill_group_id: null,
     asr: { vendor: "tencent", engine_model_type: "16k_zh" },
-    tts: { vendor: "openai", base_url: "https://tts.example/v1", model: "tts-1" },
+    tts: { vendor: "volcengine", voice_type: "S_my_voice", resource_id: "volc.megatts.default" },
     llm: { vendor: "openai", base_url: "https://llm.example/v1", model: "llm-1" },
   };
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
@@ -182,7 +186,7 @@ test("ai scenes form shows tencent asr fields and keeps the vendor on save", asy
     fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
     expect(await screen.findByPlaceholderText("8k_zh")).toHaveValue("16k_zh");
     expect(screen.getByText(/TENCENT_APP_ID/)).toBeInTheDocument();
-    expect(screen.getAllByText("密钥环境变量名").length).toBe(1);
+    expect(screen.queryByText("密钥环境变量名")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^(确\s*定|OK)$/ }));
     await waitFor(() =>
@@ -191,6 +195,7 @@ test("ai scenes form shows tencent asr fields and keeps the vendor on save", asy
     const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PUT");
     const body = JSON.parse(String((put?.[1] as RequestInit).body));
     expect(body.asr).toEqual(scene.asr);
+    expect(body.tts).toEqual(scene.tts);
   } finally {
     sessionStorage.removeItem("vr_access_token");
     vi.unstubAllGlobals();

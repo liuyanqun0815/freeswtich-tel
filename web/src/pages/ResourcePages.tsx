@@ -402,7 +402,7 @@ export function ExtensionsPage() {
         >
           <Form.Item name="ext" label="分机号">
             <Input allowClear placeholder="分机号 / 显示名" style={{ width: 180 }} />
-          </Form.Item>
+        </Form.Item>
           <Form.Item>
             <Space>
               <Button type="primary" htmlType="submit">
@@ -425,7 +425,7 @@ export function ExtensionsPage() {
         dataSource={shown}
         locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
         pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 条` }}
-        columns={[
+      columns={[
           { title: "分机号", dataIndex: "ext_number", width: 140 },
           {
             title: "显示名",
@@ -941,7 +941,7 @@ export function GatewaysNumbersPage() {
                 );
               }
               if (kind === "queue") {
-                return (
+  return (
                   <Form.Item
                     name="entry_target"
                     label="入口目标"
@@ -954,7 +954,7 @@ export function GatewaysNumbersPage() {
                         label: sg.name,
                       }))}
                     />
-                  </Form.Item>
+        </Form.Item>
                 );
               }
               if (kind === "ivr") {
@@ -1252,7 +1252,7 @@ export function IvrPage() {
         dataSource={items}
         locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
         pagination={false}
-        columns={[
+      columns={[
           { title: "ID", dataIndex: "id", width: 80 },
           { title: "名称", dataIndex: "name" },
           {
@@ -1371,7 +1371,7 @@ export function IvrPage() {
                           );
                         }
                         if (kind === "playback") {
-                          return (
+  return (
                             <Form.Item
                               {...field}
                               name={[field.name, "target"]}
@@ -1380,7 +1380,7 @@ export function IvrPage() {
                               style={{ minWidth: 280 }}
                             >
                               <SoundPathField placeholder="上传或填写路径" />
-                            </Form.Item>
+        </Form.Item>
                           );
                         }
                         return null;
@@ -1505,7 +1505,7 @@ export function SkillGroupsPage() {
         dataSource={items}
         locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
         pagination={false}
-        columns={[
+      columns={[
           { title: "名称", dataIndex: "name" },
           {
             title: "成员分机",
@@ -1528,9 +1528,9 @@ export function SkillGroupsPage() {
                 </Popconfirm>
               </Space>
             ),
-          },
-        ]}
-      />
+        },
+      ]}
+    />
       <Modal
         title={editing ? "编辑技能组" : "新增技能组"}
         open={open}
@@ -1604,12 +1604,10 @@ export function BlacklistPage() {
 type ProviderConfig = {
   vendor?: string;
   base_url?: string;
-  api_key_env?: string;
   model?: string;
-  language?: string;
-  voice?: string;
-  sample_rate?: number;
   engine_model_type?: string;
+  voice_type?: string;
+  resource_id?: string;
   api_key?: string;
   api_key_set?: boolean;
 };
@@ -1636,30 +1634,23 @@ const FALLBACK_OPTIONS = [
   { value: "hangup", label: "挂机" },
 ];
 
-const ASR_VENDOR_OPTIONS = [
-  { value: "openai", label: "OpenAI 兼容" },
-  { value: "tencent", label: "腾讯云实时识别" },
-];
+const trimmed = (value?: string) => value?.trim() || undefined;
 
-function providerBody(config: ProviderConfig = {}): ProviderConfig {
-  const text = (value?: string) => value?.trim() || undefined;
-  if (config.vendor === "tencent") {
-    return { vendor: "tencent", engine_model_type: text(config.engine_model_type) };
-  }
-  return {
-    vendor: "openai",
-    base_url: text(config.base_url),
-    api_key_env: text(config.api_key_env),
-    model: text(config.model),
-    language: text(config.language),
-    voice: text(config.voice),
-    sample_rate: config.sample_rate ? Number(config.sample_rate) : undefined,
-  };
+function asrBody(config: ProviderConfig = {}): ProviderConfig {
+  return { vendor: "tencent", engine_model_type: trimmed(config.engine_model_type) };
+}
+
+function ttsBody(config: ProviderConfig = {}): ProviderConfig {
+  return { vendor: "volcengine", voice_type: trimmed(config.voice_type), resource_id: trimmed(config.resource_id) };
 }
 
 function llmBody(config: ProviderConfig = {}): ProviderConfig {
-  const { api_key_env: _ignored, ...body } = providerBody(config);
-  return { ...body, api_key: config.api_key?.trim() || undefined };
+  return {
+    vendor: "openai",
+    base_url: trimmed(config.base_url),
+    model: trimmed(config.model),
+    api_key: trimmed(config.api_key),
+  };
 }
 
 function LlmFields({ keySet }: { keySet: boolean }) {
@@ -1673,7 +1664,7 @@ function LlmFields({ keySet }: { keySet: boolean }) {
         extra="OpenAI 兼容格式，例如 https://api.deepseek.com/v1"
       >
         <Input placeholder="https://api.example.com/v1" />
-      </Form.Item>
+        </Form.Item>
       <Form.Item name={["llm", "api_key"]} label="API Key" extra="保存后不再显示；改了接口地址需要重新填写">
         <Input.Password
           autoComplete="new-password"
@@ -1691,7 +1682,7 @@ function TencentAsrFields() {
   return (
     <>
       <Typography.Paragraph type="secondary">
-        AppId、SecretId、SecretKey 写在服务器 .env 的 TENCENT_APP_ID、TENCENT_SECRET_ID、TENCENT_SECRET_KEY
+        使用腾讯云实时语音识别。AppId、SecretId、SecretKey 写在服务器 .env 的 TENCENT_APP_ID、TENCENT_SECRET_ID、TENCENT_SECRET_KEY
       </Typography.Paragraph>
       <Form.Item name={["asr", "engine_model_type"]} label="识别模型" extra="电话音频用 8k_zh">
         <Input placeholder="8k_zh" />
@@ -1700,32 +1691,22 @@ function TencentAsrFields() {
   );
 }
 
-function ProviderFields({
-  name,
-  title,
-  children,
-}: {
-  name: "asr" | "tts" | "llm";
-  title?: string;
-  children?: ReactNode;
-}) {
+function VolcTtsFields() {
   return (
     <>
-      {title ? <Typography.Title level={5}>{title}</Typography.Title> : null}
+      <Typography.Paragraph type="secondary">
+        使用火山引擎双向流式语音合成。AppId、Access Token 写在服务器 .env 的 VOLC_APP_ID、VOLC_ACCESS_TOKEN
+      </Typography.Paragraph>
+      <Form.Item name={["tts", "voice_type"]} label="音色" rules={[{ required: true, message: "请填写音色" }]}>
+        <Input placeholder="zh_female_shuangkuaisisi_moon_bigtts" />
+      </Form.Item>
       <Form.Item
-        name={[name, "base_url"]}
-        label="接口地址"
-        rules={[{ required: true, message: "请填写接口地址" }]}
+        name={["tts", "resource_id"]}
+        label="资源 ID"
+        extra="留空自动选择：S_ 开头的复刻音色用 volc.megatts.default，其他用 volc.service_type.10029"
       >
-        <Input placeholder="https://api.example.com/v1" />
+        <Input placeholder="volc.service_type.10029" />
       </Form.Item>
-      <Form.Item name={[name, "api_key_env"]} label="密钥环境变量名" extra="密钥写在 .env，这里只填变量名">
-        <Input placeholder="DEEPSEEK_API_KEY" />
-      </Form.Item>
-      <Form.Item name={[name, "model"]} label="模型" rules={[{ required: true, message: "请填写模型" }]}>
-        <Input />
-      </Form.Item>
-      {children}
     </>
   );
 }
@@ -1772,8 +1753,8 @@ export function AiScenesPage() {
       fallback: "transfer",
       system_prompt: "",
       transfer_skill_group_id: undefined,
-      asr: { vendor: "openai", language: "zh" },
-      tts: { sample_rate: 24000 },
+      asr: { vendor: "tencent", engine_model_type: "8k_zh" },
+      tts: { vendor: "volcengine" },
       llm: {},
     });
     setOpen(true);
@@ -1794,8 +1775,8 @@ export function AiScenesPage() {
       ws_url: editing?.ws_url ?? null,
       system_prompt: values.system_prompt?.trim() ?? "",
       transfer_skill_group_id: values.transfer_skill_group_id ?? null,
-      asr: providerBody(values.asr),
-      tts: providerBody(values.tts),
+      asr: asrBody(values.asr),
+      tts: ttsBody(values.tts),
       llm: llmBody(values.llm),
     };
     const resp = editing
@@ -1839,7 +1820,7 @@ export function AiScenesPage() {
         dataSource={items}
         locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
         pagination={false}
-        columns={[
+      columns={[
           { title: "ID", dataIndex: "id", width: 60 },
           { title: "名称", dataIndex: "name" },
           { title: "开场白", dataIndex: "opening", ellipsis: true },
@@ -1901,30 +1882,9 @@ export function AiScenesPage() {
             />
           </Form.Item>
           <Typography.Title level={5}>语音识别</Typography.Title>
-          <Form.Item name={["asr", "vendor"]} label="厂商">
-            <Select options={ASR_VENDOR_OPTIONS} />
-          </Form.Item>
-          <Form.Item noStyle shouldUpdate={(prev, next) => prev.asr?.vendor !== next.asr?.vendor}>
-            {() =>
-              form.getFieldValue(["asr", "vendor"]) === "tencent" ? (
-                <TencentAsrFields />
-              ) : (
-                <ProviderFields name="asr">
-                  <Form.Item name={["asr", "language"]} label="语言">
-                    <Input placeholder="zh" />
-                  </Form.Item>
-                </ProviderFields>
-              )
-            }
-          </Form.Item>
-          <ProviderFields name="tts" title="语音合成">
-            <Form.Item name={["tts", "voice"]} label="音色">
-              <Input placeholder="alloy" />
-            </Form.Item>
-            <Form.Item name={["tts", "sample_rate"]} label="输出采样率">
-              <Input type="number" placeholder="24000" />
-            </Form.Item>
-          </ProviderFields>
+          <TencentAsrFields />
+          <Typography.Title level={5}>语音合成</Typography.Title>
+          <VolcTtsFields />
           <LlmFields keySet={Boolean(editing?.llm?.api_key_set)} />
         </Form>
       </Modal>
@@ -2111,7 +2071,7 @@ export function SystemPage() {
         >
           <Form.Item name="q" label="用户">
             <Input allowClear placeholder="用户名 / 分机号" style={{ width: 180 }} />
-          </Form.Item>
+        </Form.Item>
           <Form.Item>
             <Space>
               <Button type="primary" htmlType="submit">
@@ -2134,7 +2094,7 @@ export function SystemPage() {
         dataSource={shown}
         locale={{ emptyText: getToken() ? "暂无数据" : "请先在右上角登录" }}
         pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 条` }}
-        columns={[
+      columns={[
           { title: "用户名", dataIndex: "username", width: 160 },
           {
             title: "角色",
