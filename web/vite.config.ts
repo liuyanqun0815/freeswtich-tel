@@ -4,6 +4,35 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // antd 整包约 800KB+，拆包后仍会超默认 500KB 阈值；业务代码已与 vendor 分离。
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) {
+            return;
+          }
+          if (id.includes("antd") || id.includes("@ant-design") || id.includes("/rc-")) {
+            return "antd";
+          }
+          if (id.includes("sip.js")) {
+            return "sip";
+          }
+          if (
+            id.includes("node_modules/react-dom") ||
+            id.includes("node_modules\\react-dom") ||
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules\\react\\") ||
+            id.includes("node_modules/scheduler") ||
+            id.includes("node_modules\\scheduler")
+          ) {
+            return "react";
+          }
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {
