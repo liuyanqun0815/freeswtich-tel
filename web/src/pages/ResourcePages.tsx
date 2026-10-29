@@ -125,7 +125,9 @@ export function AgentWorkbenchPage({
   wssUrl,
 }: AgentWorkbenchPageProps) {
   const [callee, setCallee] = useState("");
+  const [transferTarget, setTransferTarget] = useState("");
   const [dialing, setDialing] = useState(false);
+  const [transferring, setTransferring] = useState(false);
   const phone = usePhoneStatus();
   const softphone = useSoftphone();
   const signedIn = Boolean(getToken());
@@ -175,6 +177,36 @@ export function AgentWorkbenchPage({
       await softphone.hangup();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "挂断失败");
+    }
+  }
+
+  async function onTransfer() {
+    const target = transferTarget.trim();
+    if (!getToken()) {
+      message.error("请先登录");
+      return;
+    }
+    if (!target) {
+      message.error("请填写转接分机");
+      return;
+    }
+    setTransferring(true);
+    try {
+      const resp = await api("/agent/transfer", {
+        method: "POST",
+        body: JSON.stringify({ target }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => null);
+        message.error(typeof detail?.detail === "string" ? detail.detail : "转接失败");
+        return;
+      }
+      message.success("已发起转接");
+      setTransferTarget("");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "转接失败");
+    } finally {
+      setTransferring(false);
     }
   }
 
@@ -234,6 +266,20 @@ export function AgentWorkbenchPage({
         </Button>
         <Button danger disabled={softphone.callState === "idle"} onClick={() => void onHangup()}>
           挂断
+        </Button>
+        <Input
+          value={transferTarget}
+          placeholder="转接分机"
+          style={{ width: 120 }}
+          disabled={softphone.callState !== "in-call"}
+          onChange={(event) => setTransferTarget(event.target.value)}
+        />
+        <Button
+          loading={transferring}
+          disabled={softphone.callState !== "in-call" || !transferTarget.trim()}
+          onClick={() => void onTransfer()}
+        >
+          转接
         </Button>
       </Space>
       <div style={{ marginBottom: 12 }}>通话：{callLabel}</div>
@@ -1061,7 +1107,7 @@ type ExtensionOption = { id: number; ext_number: string; display_name: string | 
 
 type IvrKeyRow = {
   digit: string;
-  kind: "extension" | "playback" | "hangup";
+  kind: "extension" | "playback" | "hangup" | "robot";
   target?: string;
   skill_group_id?: number;
 };
@@ -1086,9 +1132,12 @@ type IvrFlowForm = {
 
 const IVR_ACTION_OPTIONS = [
   { value: "extension", label: "转分机 / 转人工" },
+  { value: "robot", label: "AI 场景" },
   { value: "playback", label: "放音" },
   { value: "hangup", label: "挂机" },
 ];
+
+const IVR_KEY_KINDS = new Set<IvrKeyRow["kind"]>(["extension", "playback", "hangup", "robot"]);
 
 function draftFromForm(values: IvrFlowForm): Record<string, unknown> {
   return {
@@ -1106,8 +1155,8 @@ function draftFromForm(values: IvrFlowForm): Record<string, unknown> {
         if (key.skill_group_id != null) {
           child.skill_group_id = key.skill_group_id;
         }
-      } else if (key.kind === "playback") {
-        child.target = key.target?.trim();
+      } else if (key.kind === "playback" || key.kind === "robot") {
+        child.target = key.target != null ? String(key.target).trim() : undefined;
       }
       return child;
     }),
@@ -1120,10 +1169,11 @@ function formFromDraft(row: IvrFlowRow): IvrFlowForm {
     name: row.name,
     prompt: String(row.draft?.prompt || ""),
     keys: children.map((child) => {
-      const kind = String(child.kind || "hangup") as IvrKeyRow["kind"];
+      const rawKind = String(child.kind || "hangup") as IvrKeyRow["kind"];
+      const kind = IVR_KEY_KINDS.has(rawKind) ? rawKind : "hangup";
       return {
         digit: String(child.digit || ""),
-        kind: kind === "extension" || kind === "playback" || kind === "hangup" ? kind : "hangup",
+        kind,
         target: child.target != null ? String(child.target) : undefined,
         skill_group_id:
           child.skill_group_id != null && child.skill_group_id !== ""
@@ -1138,6 +1188,7 @@ export function IvrPage() {
   const [items, setItems] = useState<IvrFlowRow[]>([]);
   const [extensions, setExtensions] = useState<ExtensionOption[]>([]);
   const [skillGroups, setSkillGroups] = useState<SkillGroupRow[]>([]);
+  const [aiScenes, setAiScenes] = useState<{ id: number; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<IvrFlowRow | null>(null);
@@ -1150,10 +1201,11 @@ export function IvrPage() {
     }
     setLoading(true);
     try {
-      const [ivrResp, extResp, sgResp] = await Promise.all([
+      const [ivrResp, extResp, sgResp, sceneResp] = await Promise.all([
         api("/ivr"),
         api("/extensions"),
         api("/skill-groups"),
+        api("/ai-scenes"),
       ]);
       if (ivrResp.ok) {
         const body = (await ivrResp.json()) as { items: IvrFlowRow[] };
@@ -1166,6 +1218,10 @@ export function IvrPage() {
       if (sgResp.ok) {
         const body = (await sgResp.json()) as { items: SkillGroupRow[] };
         setSkillGroups(body.items ?? []);
+      }
+      if (sceneResp.ok) {
+        const body = (await sceneResp.json()) as { items: { id: number; name: string }[] };
+        setAiScenes(body.items ?? []);
       }
     } finally {
       setLoading(false);
@@ -1241,7 +1297,7 @@ export function IvrPage() {
         </Button>
       </div>
       <Typography.Text type="secondary">
-        保存为草稿后需点「发布」。号码入口选 IVR 时，目标填流程 ID。按键转分机可下拉选分机，离线时进该按键的兜底技能组。
+        保存为草稿后需点「发布」。号码入口选 IVR 时，目标填流程 ID。按键可转分机、接入 AI 场景、放音或挂机；转分机离线时进兜底技能组。
       </Typography.Text>
       <Table<IvrFlowRow>
         style={{ marginTop: 12 }}
@@ -1327,7 +1383,13 @@ export function IvrPage() {
                       label="动作"
                       rules={[{ required: true, message: "动作" }]}
                     >
-                      <Select style={{ width: 150 }} options={IVR_ACTION_OPTIONS} />
+                      <Select
+                        style={{ width: 150 }}
+                        options={IVR_ACTION_OPTIONS}
+                        onChange={() =>
+                          form.setFieldValue(["keys", field.name, "target"], undefined)
+                        }
+                      />
                     </Form.Item>
                     <Form.Item noStyle shouldUpdate>
                       {() => {
@@ -1370,8 +1432,27 @@ export function IvrPage() {
                             </>
                           );
                         }
+                        if (kind === "robot") {
+                          return (
+                            <Form.Item
+                              {...field}
+                              name={[field.name, "target"]}
+                              label="AI 场景"
+                              rules={[{ required: true, message: "请选择 AI 场景" }]}
+                            >
+                              <Select
+                                style={{ width: 200 }}
+                                placeholder="选择 AI 场景"
+                                options={aiScenes.map((scene) => ({
+                                  value: String(scene.id),
+                                  label: scene.name,
+                                }))}
+                              />
+                            </Form.Item>
+                          );
+                        }
                         if (kind === "playback") {
-  return (
+                          return (
                             <Form.Item
                               {...field}
                               name={[field.name, "target"]}
@@ -1380,7 +1461,7 @@ export function IvrPage() {
                               style={{ minWidth: 280 }}
                             >
                               <SoundPathField placeholder="上传或填写路径" />
-        </Form.Item>
+                            </Form.Item>
                           );
                         }
                         return null;
@@ -1766,6 +1847,7 @@ export function AiScenesPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AiSceneRow | null>(null);
   const [form] = Form.useForm<AiSceneForm>();
+  const fallback = Form.useWatch("fallback", form);
 
   const load = useCallback(async () => {
     if (!getToken()) {
@@ -1922,9 +2004,22 @@ export function AiScenesPage() {
           <Form.Item name="fallback" label="失败降级" rules={[{ required: true, message: "请选择降级方式" }]}>
             <Select options={FALLBACK_OPTIONS} />
           </Form.Item>
-          <Form.Item name="transfer_skill_group_id" label="转人工技能组">
+          <Form.Item
+            name="transfer_skill_group_id"
+            label="转人工技能组"
+            rules={
+              fallback === "transfer"
+                ? [{ required: true, message: "失败降级为转人工时请选择技能组" }]
+                : []
+            }
+            extra={
+              fallback === "transfer"
+                ? "机器人失败或主动转人工时，将接入该技能组中在线的分机；未选则会挂断"
+                : "仅在失败降级为「转人工」时必填"
+            }
+          >
             <Select
-              allowClear
+              allowClear={fallback !== "transfer"}
               placeholder="选择技能组"
               options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
             />

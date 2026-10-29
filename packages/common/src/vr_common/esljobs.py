@@ -67,14 +67,20 @@ def enqueue_command(cmd: str) -> None:
     get_job_queue().push(json.dumps({"cmd": cmd}))
 
 
+def enqueue_blind_transfer(from_ext: str, to_ext: str) -> None:
+    get_job_queue().push(
+        json.dumps({"type": "blind_transfer", "from_ext": from_ext, "to_ext": to_ext}, ensure_ascii=False)
+    )
+
+
 def enqueue_directory_flush(ext: str) -> None:
     """Directory users are cacheable, so a save must flush that user."""
     for cmd in on_extension_saved(ext, True):
         get_job_queue().push(json.dumps({"cmd": cmd}))
 
 
-def drain_commands() -> list[str]:
-    commands: list[str] = []
+def drain_jobs() -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
     queue = get_job_queue()
     while True:
         raw = queue.pop()
@@ -84,7 +90,15 @@ def drain_commands() -> list[str]:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        cmd = payload.get("cmd") if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            jobs.append(payload)
+    return jobs
+
+
+def drain_commands() -> list[str]:
+    commands: list[str] = []
+    for payload in drain_jobs():
+        cmd = payload.get("cmd")
         if isinstance(cmd, str) and cmd:
             commands.append(cmd)
     return commands

@@ -17,7 +17,8 @@ from vr_common.commands import FsCommand, bridge
 from vr_common.db import DEFAULT_TENANT
 from vr_common.dialer import TaskWindow, next_action
 from vr_common.dispatch import offer
-from vr_common.esljobs import drain_commands
+from vr_common.blind_transfer import pick_extension_leg_uuid
+from vr_common.esljobs import drain_jobs
 from vr_common.sipcred import domain_for_tenant
 from vr_common.inbound import EntryView, decide_park, robot_stream_commands
 from vr_common.ivr import step as ivr_step
@@ -344,16 +345,42 @@ def apply_pending_release(
     return row.status
 
 
-def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:
-    """Take directory-flush jobs enqueued by the API."""
+def _commands_for_blind_transfer(ctx: EngineCtx, from_ext: str, to_ext: str) -> list[FsCommand]:
+    """Resolve the agent leg UUID then blind-transfer that leg to ``to_ext``."""
+    if ctx.transport is None:
+        logger.warning("blind transfer skipped: no ESL transport from=%s to=%s", from_ext, to_ext)
+        return []
     try:
-        commands = drain_commands()
+        body = esl_api(ctx.transport, "show channels as json")
+    except Exception:
+        logger.exception("blind transfer show channels failed from=%s", from_ext)
+        return []
+    uuid = pick_extension_leg_uuid(body, from_ext)
+    if not uuid:
+        logger.warning("blind transfer no active leg from=%s to=%s", from_ext, to_ext)
+        return []
+    return [_extension_transfer(uuid, to_ext)]
+
+
+def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:
+    """Take ESL jobs enqueued by the API (directory flush, blind transfer, raw cmds)."""
+    try:
+        jobs = drain_jobs()
     except Exception:
         return []
     cmds: list[FsCommand] = []
-    for command in commands:
-        api, _, args = command.partition(" ")
-        cmds.append(FsCommand(api, args))
+    for job in jobs:
+        job_type = str(job.get("type") or "")
+        if job_type == "blind_transfer":
+            from_ext = str(job.get("from_ext") or "").strip()
+            to_ext = str(job.get("to_ext") or "").strip()
+            if from_ext and to_ext:
+                cmds.extend(_commands_for_blind_transfer(ctx, from_ext, to_ext))
+            continue
+        command = job.get("cmd")
+        if isinstance(command, str) and command:
+            api, _, args = command.partition(" ")
+            cmds.append(FsCommand(api, args))
     return cmds
 
 
