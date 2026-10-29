@@ -150,10 +150,10 @@ test("ai scenes create form does not keep values from a previously edited scene"
   try {
     render(<AiScenesPage />);
     fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
-    expect(await screen.findByPlaceholderText("zh_female_shuangkuaisisi_moon_bigtts")).toHaveValue("anna");
+    expect(await screen.findByPlaceholderText("S_BiN8cuJi1")).toHaveValue("anna");
     fireEvent.click(screen.getByRole("button", { name: /^(取\s*消|Cancel)$/ }));
     fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
-    await waitFor(() => expect(screen.getByPlaceholderText("zh_female_shuangkuaisisi_moon_bigtts")).toHaveValue(""));
+    await waitFor(() => expect(screen.getByPlaceholderText("S_BiN8cuJi1")).toHaveValue("S_BiN8cuJi1"));
   } finally {
     sessionStorage.removeItem("vr_access_token");
     vi.unstubAllGlobals();

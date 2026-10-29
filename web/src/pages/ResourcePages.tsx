@@ -1698,14 +1698,14 @@ function VolcTtsFields() {
         使用火山引擎双向流式语音合成。AppId、Access Token 写在服务器 .env 的 VOLC_APP_ID、VOLC_ACCESS_TOKEN
       </Typography.Paragraph>
       <Form.Item name={["tts", "voice_type"]} label="音色" rules={[{ required: true, message: "请填写音色" }]}>
-        <Input placeholder="zh_female_shuangkuaisisi_moon_bigtts" />
+        <Input placeholder="S_BiN8cuJi1" />
       </Form.Item>
       <Form.Item
         name={["tts", "resource_id"]}
         label="资源 ID"
         extra="留空自动选择：S_ 开头的复刻音色用 volc.megatts.default，其他用 volc.service_type.10029"
       >
-        <Input placeholder="volc.service_type.10029" />
+        <Input placeholder="volc.megatts.default" />
       </Form.Item>
     </>
   );
@@ -1754,7 +1754,7 @@ export function AiScenesPage() {
       system_prompt: "",
       transfer_skill_group_id: undefined,
       asr: { vendor: "tencent", engine_model_type: "8k_zh" },
-      tts: { vendor: "volcengine" },
+      tts: { vendor: "volcengine", voice_type: "S_BiN8cuJi1", resource_id: "volc.megatts.default" },
       llm: {},
     });
     setOpen(true);
