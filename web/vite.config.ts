@@ -23,6 +23,7 @@ export default defineConfig({
       "/fs-nodes": "http://127.0.0.1:8080",
       "/users": "http://127.0.0.1:8080",
       "/calls": "http://127.0.0.1:8080",
+      "/agent": "http://127.0.0.1:8080",
       "/registrations": "http://127.0.0.1:8080",
       "/ws": {
         target: "http://127.0.0.1:8082",

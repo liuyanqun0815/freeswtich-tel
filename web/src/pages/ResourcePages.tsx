@@ -223,7 +223,14 @@ export function AgentWorkbenchPage({
       });
       if (!resp.ok) {
         const detail = await resp.json().catch(() => null);
-        message.error(typeof detail?.detail === "string" ? detail.detail : "转接失败");
+        const msg =
+          typeof detail?.detail === "string"
+            ? detail.detail
+            : Array.isArray(detail?.detail)
+              ? detail.detail.map((item: { msg?: string }) => item?.msg).filter(Boolean).join("; ") ||
+                `转接失败 (${resp.status})`
+              : `转接失败 (${resp.status})`;
+        message.error(msg);
         return;
       }
       message.success("已发起转接");
