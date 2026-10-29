@@ -30,14 +30,41 @@ def test_drain_flush_commands_resolves_blind_transfer_job(monkeypatch):
 
     channels = {
         "rows": [
-            {"uuid": "leg-1", "cid_num": "1001", "dest": "4001", "callstate": "ACTIVE"},
+            {
+                "uuid": "caller",
+                "cid_num": "1000",
+                "call_uuid": "call-1",
+                "callstate": "ACTIVE",
+            },
+            {
+                "uuid": "leg-1",
+                "cid_num": "1001",
+                "call_uuid": "call-1",
+                "callstate": "ACTIVE",
+            },
         ]
     }
     ctx = EngineCtx(entries={}, numbers={}, transport=FakeTransport(json.dumps(channels)))
     cmds = drain_flush_commands(ctx)
     assert cmds[0] == FsCommand("sofia", "profile internal flush_inbound_reg 1000")
     assert cmds[1].api == "uuid_transfer"
-    assert cmds[1].args.startswith("leg-1 bridge:${sofia_contact(1002@")
+    # Transfer the caller leg so the agent drops and the target rings.
+    assert cmds[1].args.startswith("caller bridge:${sofia_contact(1002@")
+    assert "-bleg" not in cmds[1].args
+
+
+def test_drain_flush_commands_blind_transfer_uses_bleg_without_peer(monkeypatch):
+    monkeypatch.setenv("DEFAULT_TENANT", "t001")
+    queue = MemoryJobQueue()
+    set_job_queue(queue)
+    enqueue_blind_transfer("1001", to_ext="1002")
+    channels = {
+        "rows": [{"uuid": "leg-1", "cid_num": "1001", "dest": "4001", "callstate": "ACTIVE"}]
+    }
+    ctx = EngineCtx(entries={}, numbers={}, transport=FakeTransport(json.dumps(channels)))
+    cmds = drain_flush_commands(ctx)
+    assert cmds[0].api == "uuid_transfer"
+    assert cmds[0].args.startswith("leg-1 -bleg bridge:${sofia_contact(1002@")
 
 
 def test_drain_flush_commands_blind_transfer_picks_skill_group_member(monkeypatch):
@@ -50,7 +77,12 @@ def test_drain_flush_commands_blind_transfer_picks_skill_group_member(monkeypatc
     set_job_queue(queue)
     enqueue_blind_transfer("1001", skill_group_id=7)
 
-    channels = {"rows": [{"uuid": "leg-1", "cid_num": "1001", "dest": "4001", "callstate": "ACTIVE"}]}
+    channels = {
+        "rows": [
+            {"uuid": "caller", "cid_num": "1000", "call_uuid": "c1", "callstate": "ACTIVE"},
+            {"uuid": "leg-1", "cid_num": "1001", "call_uuid": "c1", "callstate": "ACTIVE"},
+        ]
+    }
     ctx = EngineCtx(
         entries={},
         numbers={},
@@ -59,4 +91,4 @@ def test_drain_flush_commands_blind_transfer_picks_skill_group_member(monkeypatc
     )
     cmds = drain_flush_commands(ctx)
     assert cmds[0].api == "uuid_transfer"
-    assert "sofia_contact(1003@" in cmds[0].args
+    assert cmds[0].args.startswith("caller bridge:${sofia_contact(1003@")

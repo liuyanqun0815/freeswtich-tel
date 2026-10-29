@@ -233,7 +233,7 @@ export function AgentWorkbenchPage({
         message.error(msg);
         return;
       }
-      message.success("已发起转接");
+      message.success("已发起转接：主叫等待对端接听，本机将自动退出通话");
       setTransferTarget("");
       setTransferSkillGroupId(undefined);
     } catch (err) {
@@ -1966,7 +1966,8 @@ export function AiScenesPage() {
       fallback: values.fallback,
       ws_url: editing?.ws_url ?? null,
       system_prompt: values.system_prompt?.trim() ?? "",
-      transfer_skill_group_id: values.transfer_skill_group_id ?? null,
+      transfer_skill_group_id:
+        values.fallback === "transfer" ? (values.transfer_skill_group_id ?? null) : null,
       asr: asrBody(values.asr),
       tts: ttsBody(values.tts),
       llm: llmBody(values.llm),
@@ -2066,26 +2067,19 @@ export function AiScenesPage() {
           <Form.Item name="fallback" label="失败降级" rules={[{ required: true, message: "请选择降级方式" }]}>
             <Select options={FALLBACK_OPTIONS} />
           </Form.Item>
-          <Form.Item
-            name="transfer_skill_group_id"
-            label="转人工技能组"
-            rules={
-              fallback === "transfer"
-                ? [{ required: true, message: "失败降级为转人工时请选择技能组" }]
-                : []
-            }
-            extra={
-              fallback === "transfer"
-                ? "机器人失败或主动转人工时，将接入该技能组中在线的分机；未选则会挂断"
-                : "仅在失败降级为「转人工」时必填"
-            }
-          >
-            <Select
-              allowClear={fallback !== "transfer"}
-              placeholder="选择技能组"
-              options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
-            />
-          </Form.Item>
+          {fallback === "transfer" ? (
+            <Form.Item
+              name="transfer_skill_group_id"
+              label="转人工技能组"
+              rules={[{ required: true, message: "失败降级为转人工时请选择技能组" }]}
+              extra="机器人失败或主动转人工时，将接入该技能组中在线的分机；未选则会挂断"
+            >
+              <Select
+                placeholder="选择技能组"
+                options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
+              />
+            </Form.Item>
+          ) : null}
           <Typography.Title level={5}>语音识别</Typography.Title>
           <TencentAsrFields />
           <Typography.Title level={5}>语音合成</Typography.Title>

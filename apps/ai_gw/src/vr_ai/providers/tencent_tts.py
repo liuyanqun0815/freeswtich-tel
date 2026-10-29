@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from collections.abc import AsyncIterator, Callable
@@ -16,6 +17,8 @@ import httpx
 
 from vr_ai.audio import PHONE_RATE
 from vr_ai.providers.base import ProviderError
+
+logger = logging.getLogger("vr.ai.tts.tencent")
 
 _HOST = "trtc.ai.tencentcloudapi.com"
 _ENDPOINT = f"https://{_HOST}/"
@@ -176,6 +179,10 @@ class TencentTts:
             region=self._region,
             timestamp=self._now(),
         )
+        started = time.monotonic()
+        total = 0
+        clip = (text[:80] + "…") if len(text) > 80 else text
+        logger.info("tts start model=%s voice=%s text=%r", self._model, self._voice_id, clip)
         try:
             async for line in self._stream_post(headers, body):
                 chunk = _parse_sse_line(line)
@@ -183,13 +190,21 @@ class TencentTts:
                     continue
                 data, is_end = chunk
                 if data:
+                    total += len(data)
                     yield data
                 if is_end:
+                    logger.info(
+                        "tts done ms=%.0f pcm_bytes=%s",
+                        (time.monotonic() - started) * 1000,
+                        total,
+                    )
                     return
         except ProviderError:
             raise
         except Exception as exc:
+            logger.exception("tts failed text=%r", clip)
             raise ProviderError(f"tencent tts failed: {exc}") from exc
+        logger.info("tts done ms=%.0f pcm_bytes=%s", (time.monotonic() - started) * 1000, total)
 
 
 def _parse_sse_line(line: str) -> tuple[bytes, bool] | None:

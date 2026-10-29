@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -10,6 +12,8 @@ import httpx
 
 from vr_ai.audio import StreamResampler, to_wav
 from vr_ai.providers.base import AsrSession, ProviderError, read_secret
+
+logger = logging.getLogger("vr.ai.openai")
 
 _TOOLS = [
     {
@@ -79,6 +83,9 @@ class OpenAiLlm:
             payload["temperature"] = self._temperature
         tool_names: dict[int, str] = {}
         url = f"{self._endpoint.base_url}/chat/completions"
+        started = time.monotonic()
+        text_chars = 0
+        logger.info("llm start model=%s messages=%s url=%s", self._model or "-", len(messages), url)
         try:
             async with self._endpoint.client() as client:
                 async with client.stream("POST", url, json=payload, headers=self._endpoint.headers) as resp:
@@ -91,7 +98,9 @@ class OpenAiLlm:
                             break
                         delta = _delta(data)
                         if delta.get("content"):
-                            yield {"text": delta["content"]}
+                            chunk = str(delta["content"])
+                            text_chars += len(chunk)
+                            yield {"text": chunk}
                         tool_calls = delta.get("tool_calls")
                         for call in tool_calls if isinstance(tool_calls, list) else []:
                             if not isinstance(call, dict):
@@ -101,8 +110,18 @@ class OpenAiLlm:
                             if isinstance(name, str) and name:
                                 index = call.get("index")
                                 tool_names[index if isinstance(index, int) else 0] = name
+                                logger.info("llm tool_call name=%s", name)
         except httpx.HTTPError as exc:
+            logger.error("llm request failed ms=%.0f: %s", (time.monotonic() - started) * 1000, exc)
             raise ProviderError(f"llm request failed: {exc}") from exc
+        actions = [_TOOL_ACTIONS[name] for name in tool_names.values() if name in _TOOL_ACTIONS]
+        logger.info(
+            "llm done ms=%.0f chars=%s tools=%s actions=%s",
+            (time.monotonic() - started) * 1000,
+            text_chars,
+            list(tool_names.values()),
+            actions,
+        )
         for name in tool_names.values():
             if name in _TOOL_ACTIONS:
                 yield {"action": _TOOL_ACTIONS[name]}
@@ -137,10 +156,13 @@ class OpenAiAsr:
             form["language"] = self._language
         files = {"file": ("speech.wav", to_wav(pcm), "audio/wav")}
         url = f"{self._endpoint.base_url}/audio/transcriptions"
+        started = time.monotonic()
+        logger.info("asr start model=%s pcm_bytes=%s", self._model, len(pcm))
         try:
             async with self._endpoint.client() as client:
                 resp = await client.post(url, data=form, files=files, headers=self._endpoint.headers)
         except httpx.HTTPError as exc:
+            logger.error("asr request failed: %s", exc)
             raise ProviderError(f"asr request failed: {exc}") from exc
         await _raise_for_status(resp, "asr")
         try:
@@ -149,7 +171,13 @@ class OpenAiAsr:
             raise ProviderError(f"asr bad response: {exc}") from exc
         if not isinstance(body, dict):
             raise ProviderError(f"asr bad response: {resp.text[:200]}")
-        return str(body.get("text") or "").strip()
+        text = str(body.get("text") or "").strip()
+        logger.info(
+            "asr done ms=%.0f text=%r",
+            (time.monotonic() - started) * 1000,
+            (text[:160] + "…") if len(text) > 160 else text,
+        )
+        return text
 
 
 class OpenAiTts:
@@ -163,16 +191,24 @@ class OpenAiTts:
         payload = {"model": self._model, "voice": self._voice, "input": text, "response_format": "pcm"}
         resampler = StreamResampler(self._sample_rate)
         url = f"{self._endpoint.base_url}/audio/speech"
+        started = time.monotonic()
+        total = 0
+        clip = (text[:80] + "…") if len(text) > 80 else text
+        logger.info("tts start model=%s voice=%s text=%r", self._model, self._voice, clip)
         try:
             async with self._endpoint.client() as client:
                 async with client.stream("POST", url, json=payload, headers=self._endpoint.headers) as resp:
                     await _raise_for_status(resp, "tts")
                     async for chunk in resp.aiter_bytes():
+                        total += len(chunk)
                         out = resampler.push(chunk)
                         if out:
                             yield out
         except httpx.HTTPError as exc:
+            logger.error("tts request failed: %s", exc)
             raise ProviderError(f"tts request failed: {exc}") from exc
         tail = resampler.flush()
         if tail:
+            total += len(tail)
             yield tail
+        logger.info("tts done ms=%.0f pcm_in_bytes=%s", (time.monotonic() - started) * 1000, total)

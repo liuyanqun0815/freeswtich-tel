@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import random
 import time
@@ -18,6 +19,8 @@ from urllib.parse import quote
 from websockets.asyncio.client import connect as ws_connect
 
 from vr_ai.providers.base import AsrSession, ProviderError
+
+logger = logging.getLogger("vr.ai.asr.tencent")
 
 _HOST = "asr.cloud.tencent.com"
 _SIGN_TTL_SECONDS = 86400
@@ -74,13 +77,23 @@ class _StreamingSession:
 
     async def finish(self) -> str:
         self._audio.put_nowait(None)
+        started = time.monotonic()
         try:
-            return await asyncio.wait_for(self._task, self._timeout)
+            text = await asyncio.wait_for(self._task, self._timeout)
         except TimeoutError as exc:
+            logger.error("asr timeout after %.0fms", (time.monotonic() - started) * 1000)
             raise ProviderError("tencent asr timed out waiting for the final result") from exc
+        logger.info(
+            "asr finish ms=%.0f chars=%s text=%r",
+            (time.monotonic() - started) * 1000,
+            len(text),
+            (text[:160] + "…") if len(text) > 160 else text,
+        )
+        return text
 
     async def _recognize(self, url: str, connect: Callable[[str], Any]) -> str:
         texts: dict[int, str] = {}
+        logger.info("asr connect engine=%s", self._url_engine_hint(url))
         try:
             async with connect(url) as ws:
                 sender = asyncio.create_task(self._send(ws))
@@ -100,8 +113,16 @@ class _StreamingSession:
         except ProviderError:
             raise
         except Exception as exc:
+            logger.exception("asr websocket failed")
             raise ProviderError(f"tencent asr failed: {exc}") from exc
         return "".join(texts[index] for index in sorted(texts)).strip()
+
+    @staticmethod
+    def _url_engine_hint(url: str) -> str:
+        marker = "engine_model_type="
+        if marker not in url:
+            return "-"
+        return url.split(marker, 1)[1].split("&", 1)[0]
 
     async def _send(self, ws: Any) -> None:
         while (chunk := await self._audio.get()) is not None:

@@ -17,7 +17,7 @@ from vr_common.commands import FsCommand, bridge
 from vr_common.db import DEFAULT_TENANT
 from vr_common.dialer import TaskWindow, next_action
 from vr_common.dispatch import offer
-from vr_common.blind_transfer import pick_extension_leg_uuid
+from vr_common.blind_transfer import resolve_blind_transfer_target
 from vr_common.esljobs import drain_jobs
 from vr_common.sipcred import domain_for_tenant
 from vr_common.inbound import EntryView, decide_park, robot_stream_commands
@@ -345,7 +345,7 @@ def apply_pending_release(
     return row.status
 
 
-def _resolve_blind_transfer_leg(ctx: EngineCtx, from_ext: str) -> str | None:
+def _resolve_blind_transfer_target(ctx: EngineCtx, from_ext: str):
     if ctx.transport is None:
         logger.warning("blind transfer skipped: no ESL transport from=%s", from_ext)
         return None
@@ -354,10 +354,28 @@ def _resolve_blind_transfer_leg(ctx: EngineCtx, from_ext: str) -> str | None:
     except Exception:
         logger.exception("blind transfer show channels failed from=%s", from_ext)
         return None
-    uuid = pick_extension_leg_uuid(body, from_ext)
-    if not uuid:
+    target = resolve_blind_transfer_target(body, from_ext)
+    if target is None:
         logger.warning("blind transfer no active leg from=%s", from_ext)
-    return uuid
+    else:
+        logger.info(
+            "blind transfer leg from=%s uuid=%s use_bleg=%s",
+            from_ext,
+            target.uuid,
+            target.use_bleg,
+        )
+    return target
+
+
+def _blind_extension_transfer(uuid: str, ext: str, *, use_bleg: bool = False) -> FsCommand:
+    """Redirect the caller (or agent+``-bleg``) to ``ext``; agent drops out of the bridge."""
+    tenant = os.environ.get("DEFAULT_TENANT", DEFAULT_TENANT)
+    domain = domain_for_tenant(tenant)
+    flag = "-bleg " if use_bleg else ""
+    return FsCommand(
+        "uuid_transfer",
+        f"{uuid} {flag}bridge:${{sofia_contact({ext}@{domain})}} inline",
+    )
 
 
 def _commands_for_blind_transfer(
@@ -367,13 +385,13 @@ def _commands_for_blind_transfer(
     to_ext: str = "",
     skill_group_id: Any = None,
 ) -> list[FsCommand]:
-    """Resolve the agent leg UUID then blind-transfer to an extension or skill-group member."""
-    uuid = _resolve_blind_transfer_leg(ctx, from_ext)
-    if not uuid:
+    """Blind-transfer the far side of the agent's call to an extension or skill-group member."""
+    leg = _resolve_blind_transfer_target(ctx, from_ext)
+    if leg is None:
         return []
     target = (to_ext or "").strip()
     if target:
-        return [_extension_transfer(uuid, target)]
+        return [_blind_extension_transfer(leg.uuid, target, use_bleg=leg.use_bleg)]
     members = [m for m in _skill_group_members(ctx, skill_group_id) if m != from_ext]
     chosen = pick_bridge_extension("", members, registered=is_registered)
     if chosen is None:
@@ -383,7 +401,7 @@ def _commands_for_blind_transfer(
             skill_group_id,
         )
         return []
-    return [_extension_transfer(uuid, chosen)]
+    return [_blind_extension_transfer(leg.uuid, chosen, use_bleg=leg.use_bleg)]
 
 
 def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:

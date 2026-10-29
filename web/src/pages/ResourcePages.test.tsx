@@ -288,6 +288,28 @@ test("ai scenes requires skill group when fallback is transfer", async () => {
   }
 });
 
+test("ai scenes hides skill group when fallback is hangup", async () => {
+  const fetchMock = vi.fn(async (url: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ items: String(url).startsWith("/skill-groups") ? [{ id: 7, name: "售后组" }] : [] }),
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  sessionStorage.setItem("vr_access_token", "test-token");
+  try {
+    render(<AiScenesPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
+    expect(await screen.findByText(/未选则会挂断/)).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByLabelText("失败降级"));
+    fireEvent.click(await screen.findByTitle("挂机"));
+    await waitFor(() => expect(screen.queryByText(/未选则会挂断/)).not.toBeInTheDocument());
+    expect(screen.queryByLabelText("转人工技能组")).not.toBeInTheDocument();
+  } finally {
+    sessionStorage.removeItem("vr_access_token");
+    vi.unstubAllGlobals();
+  }
+});
+
 test("ai scenes tts vendor dropdown switches fields and saves tencent body", async () => {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
     ok: true,

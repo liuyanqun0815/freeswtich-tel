@@ -98,9 +98,24 @@ async def fs_stream(ws: WebSocket) -> None:
         await ws.send_text(stream_audio_message(wav))
 
     session = BotSession(
-        scene=bundle.scene, asr=asr, tts=tts, llm=llm, send_audio=send_audio, send_command=send_command
+        scene=bundle.scene,
+        asr=asr,
+        tts=tts,
+        llm=llm,
+        send_audio=send_audio,
+        send_command=send_command,
+        call_id=call_id,
+        uuid=uuid,
     )
-    logger.info("bot session start call_id=%s uuid=%s scene_id=%s", call_id, uuid, scene_id)
+    logger.info(
+        "bot session start call_id=%s uuid=%s scene_id=%s asr=%s tts=%s llm=%s",
+        call_id,
+        uuid,
+        scene_id,
+        type(asr).__name__,
+        type(tts).__name__,
+        type(llm).__name__,
+    )
     try:
         await session.start()
         while True:

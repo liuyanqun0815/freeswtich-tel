@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 import struct
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ from websockets.asyncio.client import connect as ws_connect
 
 from vr_ai.audio import PHONE_RATE
 from vr_ai.providers.base import ProviderError
+
+logger = logging.getLogger("vr.ai.tts.volc")
 
 _ENDPOINT = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
 
@@ -160,6 +164,10 @@ class VolcTts:
             "X-Api-Connect-Id": str(uuid.uuid4()),
         }
         session_id = str(uuid.uuid4())
+        started = time.monotonic()
+        total = 0
+        clip = (text[:80] + "…") if len(text) > 80 else text
+        logger.info("tts start voice=%s resource=%s text=%r", self._voice, self._resource_id, clip)
         try:
             async with self._connect(_ENDPOINT, headers) as ws:
                 await ws.send(_client_frame(_START_CONNECTION, b"{}"))
@@ -171,6 +179,7 @@ class VolcTts:
                 async for raw in ws:
                     message = _parse(raw)
                     if message.msg_type == _AUDIO_SERVER and message.payload:
+                        total += len(message.payload)
                         yield message.payload
                     elif message.event == _SESSION_FINISHED:
                         break
@@ -180,4 +189,6 @@ class VolcTts:
         except ProviderError:
             raise
         except Exception as exc:
+            logger.exception("tts failed text=%r", clip)
             raise ProviderError(f"volcengine tts failed: {exc}") from exc
+        logger.info("tts done ms=%.0f pcm_bytes=%s", (time.monotonic() - started) * 1000, total)
