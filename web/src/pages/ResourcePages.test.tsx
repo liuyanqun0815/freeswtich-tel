@@ -202,25 +202,116 @@ test("ai scenes form shows tencent asr fields and keeps the vendor on save", asy
   }
 });
 
+test("ivr form can bind a key to an AI scene", async () => {
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (String(url).startsWith("/ai-scenes")) {
+        return { items: [{ id: 5, name: "售后机器人" }] };
+      }
+      if (String(url).startsWith("/skill-groups")) {
+        return { items: [{ id: 7, name: "售后组", members: [], ring_timeout_seconds: 20 }] };
+      }
+      if (String(url).startsWith("/extensions")) {
+        return { items: [{ id: 1, ext_number: "1001", display_name: "坐席" }] };
+      }
+      if (init?.method === "POST" && String(url) === "/ivr") {
+        return { id: 3, name: "主菜单", version: 0, draft: {} };
+      }
+      if (String(url).startsWith("/ivr")) {
+        return { items: [] };
+      }
+      return { items: [] };
+    },
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  sessionStorage.setItem("vr_access_token", "test-token");
+  try {
+    render(<IvrPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "新增流程" }));
+    fireEvent.change(await screen.findByPlaceholderText("主菜单"), { target: { value: "主菜单" } });
+    fireEvent.change(screen.getByPlaceholderText(/ivr\/ivr-welcome/), {
+      target: { value: "ivr/ivr-welcome" },
+    });
+    const digitInput = screen.getByDisplayValue("0");
+    fireEvent.change(digitInput, { target: { value: "2" } });
+    fireEvent.mouseDown(screen.getByText("转分机 / 转人工"));
+    fireEvent.click(await screen.findByText("AI 场景"));
+    expect(await screen.findByText("选择 AI 场景")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByText("选择 AI 场景"));
+    fireEvent.click(await screen.findByText("售后机器人"));
+    fireEvent.click(screen.getByRole("button", { name: /^(确\s*定|OK)$/ }));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(
+        true,
+      ),
+    );
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) => String(url) === "/ivr" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    const body = JSON.parse(String((post?.[1] as RequestInit).body));
+    expect(body.draft.children[0]).toEqual({
+      digit: "2",
+      id: "n1",
+      kind: "robot",
+      target: "5",
+    });
+
+  } finally {
+    sessionStorage.removeItem("vr_access_token");
+    vi.unstubAllGlobals();
+  }
+});
+
+test("ai scenes requires skill group when fallback is transfer", async () => {
+  const fetchMock = vi.fn(async (url: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ items: String(url).startsWith("/skill-groups") ? [{ id: 7, name: "售后组" }] : [] }),
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  sessionStorage.setItem("vr_access_token", "test-token");
+  try {
+    render(<AiScenesPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
+    expect(await screen.findByText(/未选则会挂断/)).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("售后机器人"), { target: { value: "缺技能组" } });
+    fireEvent.click(screen.getByRole("button", { name: /^(确\s*定|OK)$/ }));
+    expect(await screen.findByText("失败降级为转人工时请选择技能组")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit | undefined)?.method !== "POST")).toBe(
+      true,
+    );
+  } finally {
+    sessionStorage.removeItem("vr_access_token");
+    vi.unstubAllGlobals();
+  }
+});
+
 test("ai scenes tts vendor dropdown switches fields and saves tencent body", async () => {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
     ok: true,
     status: 200,
-    json: async () =>
-      init?.method === "POST"
-        ? {
-            id: 9,
-            name: "腾讯合成",
-            opening: "",
-            fallback: "hangup",
-            ws_url: null,
-            system_prompt: "hi",
-            transfer_skill_group_id: null,
-            asr: { vendor: "tencent", engine_model_type: "8k_zh" },
-            tts: { vendor: "tencent", voice_id: "v-female-R2s4N9qJ", model: "flow_02_turbo" },
-            llm: { vendor: "openai", base_url: "https://llm.example/v1", model: "llm-1" },
-          }
-        : { items: [] },
+    json: async () => {
+      if (String(url).startsWith("/skill-groups")) {
+        return { items: [{ id: 7, name: "售后组" }] };
+      }
+      if (init?.method === "POST") {
+        return {
+          id: 9,
+          name: "腾讯合成",
+          opening: "",
+          fallback: "transfer",
+          ws_url: null,
+          system_prompt: "hi",
+          transfer_skill_group_id: 7,
+          asr: { vendor: "tencent", engine_model_type: "8k_zh" },
+          tts: { vendor: "tencent", voice_id: "v-female-R2s4N9qJ", model: "flow_02_turbo" },
+          llm: { vendor: "openai", base_url: "https://llm.example/v1", model: "llm-1" },
+        };
+      }
+      return { items: [] };
+    },
   }));
   vi.stubGlobal("fetch", fetchMock);
   sessionStorage.setItem("vr_access_token", "test-token");
@@ -235,6 +326,8 @@ test("ai scenes tts vendor dropdown switches fields and saves tencent body", asy
     expect(screen.queryByText(/VOLC_APP_ID/)).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "腾讯合成" } });
+    fireEvent.mouseDown(screen.getByText("选择技能组"));
+    fireEvent.click(await screen.findByText("售后组"));
     fireEvent.change(screen.getByPlaceholderText("v-female-R2s4N9qJ"), {
       target: { value: "v-female-R2s4N9qJ" },
     });
@@ -253,6 +346,7 @@ test("ai scenes tts vendor dropdown switches fields and saves tencent body", asy
     const post = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
     const body = JSON.parse(String((post?.[1] as RequestInit).body));
     expect(body.tts).toEqual({ vendor: "tencent", voice_id: "v-female-R2s4N9qJ" });
+    expect(body.transfer_skill_group_id).toBe(7);
     expect(body.tts.voice_type).toBeUndefined();
   } finally {
     sessionStorage.removeItem("vr_access_token");

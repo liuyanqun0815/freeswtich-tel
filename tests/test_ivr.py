@@ -30,6 +30,19 @@ def test_publish_locks_old_call_to_previous_snapshot():
     assert step(pub["snapshot"], "root", "1")["target"] == "g1"
 
 
+def test_step_goto_robot_child_keeps_scene_target():
+    snapshot = {
+        "id": "root",
+        "kind": "menu",
+        "children": [{"digit": "2", "id": "n1", "kind": "robot", "target": "5"}],
+    }
+    result = step(snapshot, "root", "2")
+    assert result["action"] == "goto"
+    assert result["kind"] == "robot"
+    assert result["target"] == "5"
+    assert result["node_id"] == "n1"
+
+
 def test_star_replays_current_prompt_node():
     snapshot = {
         "id": "root",
@@ -38,6 +51,7 @@ def test_star_replays_current_prompt_node():
         "children": [{"digit": "1", "id": "n1", "kind": "hangup"}],
     }
     result = step(snapshot, "root", "*")
+
     assert result["action"] == "replay"
     assert result["node_id"] == "root"
 
