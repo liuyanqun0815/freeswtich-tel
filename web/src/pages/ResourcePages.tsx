@@ -125,7 +125,10 @@ export function AgentWorkbenchPage({
   wssUrl,
 }: AgentWorkbenchPageProps) {
   const [callee, setCallee] = useState("");
+  const [transferMode, setTransferMode] = useState<"extension" | "skill_group">("extension");
   const [transferTarget, setTransferTarget] = useState("");
+  const [transferSkillGroupId, setTransferSkillGroupId] = useState<number | undefined>();
+  const [skillGroups, setSkillGroups] = useState<{ id: number; name: string }[]>([]);
   const [dialing, setDialing] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const phone = usePhoneStatus();
@@ -151,6 +154,21 @@ export function AgentWorkbenchPage({
             : extension && extension !== "—"
               ? "未注册"
               : "未绑定";
+
+  useEffect(() => {
+    if (!getToken()) {
+      setSkillGroups([]);
+      return;
+    }
+    void (async () => {
+      const resp = await api("/skill-groups");
+      if (!resp.ok) {
+        return;
+      }
+      const body = (await resp.json()) as { items: { id: number; name: string }[] };
+      setSkillGroups(body.items ?? []);
+    })();
+  }, [signedIn]);
 
   async function onDial() {
     if (!getToken()) {
@@ -181,12 +199,19 @@ export function AgentWorkbenchPage({
   }
 
   async function onTransfer() {
-    const target = transferTarget.trim();
     if (!getToken()) {
       message.error("请先登录");
       return;
     }
-    if (!target) {
+    const body =
+      transferMode === "skill_group"
+        ? { skill_group_id: transferSkillGroupId }
+        : { target: transferTarget.trim() };
+    if (transferMode === "skill_group" && transferSkillGroupId == null) {
+      message.error("请选择转接技能组");
+      return;
+    }
+    if (transferMode === "extension" && !transferTarget.trim()) {
       message.error("请填写转接分机");
       return;
     }
@@ -194,7 +219,7 @@ export function AgentWorkbenchPage({
     try {
       const resp = await api("/agent/transfer", {
         method: "POST",
-        body: JSON.stringify({ target }),
+        body: JSON.stringify(body),
       });
       if (!resp.ok) {
         const detail = await resp.json().catch(() => null);
@@ -203,6 +228,7 @@ export function AgentWorkbenchPage({
       }
       message.success("已发起转接");
       setTransferTarget("");
+      setTransferSkillGroupId(undefined);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "转接失败");
     } finally {
@@ -267,16 +293,45 @@ export function AgentWorkbenchPage({
         <Button danger disabled={softphone.callState === "idle"} onClick={() => void onHangup()}>
           挂断
         </Button>
-        <Input
-          value={transferTarget}
-          placeholder="转接分机"
-          style={{ width: 120 }}
+        <Select
+          value={transferMode}
+          style={{ width: 110 }}
           disabled={softphone.callState !== "in-call"}
-          onChange={(event) => setTransferTarget(event.target.value)}
+          options={[
+            { value: "extension", label: "转分机" },
+            { value: "skill_group", label: "转技能组" },
+          ]}
+          onChange={(value: "extension" | "skill_group") => {
+            setTransferMode(value);
+            setTransferTarget("");
+            setTransferSkillGroupId(undefined);
+          }}
         />
+        {transferMode === "skill_group" ? (
+          <Select
+            value={transferSkillGroupId}
+            placeholder="选择技能组"
+            style={{ width: 160 }}
+            disabled={softphone.callState !== "in-call"}
+            options={skillGroups.map((sg) => ({ value: sg.id, label: sg.name }))}
+            onChange={(value: number) => setTransferSkillGroupId(value)}
+            allowClear
+          />
+        ) : (
+          <Input
+            value={transferTarget}
+            placeholder="转接分机"
+            style={{ width: 120 }}
+            disabled={softphone.callState !== "in-call"}
+            onChange={(event) => setTransferTarget(event.target.value)}
+          />
+        )}
         <Button
           loading={transferring}
-          disabled={softphone.callState !== "in-call" || !transferTarget.trim()}
+          disabled={
+            softphone.callState !== "in-call" ||
+            (transferMode === "skill_group" ? transferSkillGroupId == null : !transferTarget.trim())
+          }
           onClick={() => void onTransfer()}
         >
           转接

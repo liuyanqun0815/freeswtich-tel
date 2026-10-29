@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from vr_api.auth import get_db, require_password_changed
 from vr_common.esljobs import enqueue_blind_transfer, enqueue_command
-from vr_common.models import Extension, User
+from vr_common.db import DEFAULT_TENANT
+from vr_common.models import Extension, SkillGroup, User
 from vr_common.registration import is_registered, list_registrations
 from vr_common.verify_call import hangup_command, load_call, originate_extension_call, save_call
 
@@ -24,7 +25,8 @@ class DialIn(BaseModel):
 
 
 class AgentTransferIn(BaseModel):
-    target: str = Field(min_length=2, max_length=32)
+    target: str | None = Field(default=None, min_length=2, max_length=32)
+    skill_group_id: int | None = None
 
 
 def _queue(cmd: str) -> None:
@@ -99,8 +101,14 @@ def agent_blind_transfer(
     user: Annotated[User, Depends(require_password_changed)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    """Blind-transfer the caller's current answered leg to another extension."""
-    target = body.target.strip()
+    """Blind-transfer the caller's current answered leg to an extension or skill group."""
+    target = (body.target or "").strip() or None
+    skill_group_id = body.skill_group_id
+    if bool(target) == (skill_group_id is not None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请指定转接分机或技能组之一",
+        )
     if user.extension_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前账号未绑定分机")
     extension = db.get(Extension, user.extension_id)
@@ -109,20 +117,32 @@ def agent_blind_transfer(
     from_ext = extension.ext_number.strip()
     if not from_ext:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前账号未绑定分机")
-    if target == from_ext:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能转给自己")
+
+    if target is not None:
+        if target == from_ext:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能转给自己")
+        try:
+            if not is_registered(target):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"分机未注册: {target}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="注册状态不可用") from exc
+        try:
+            enqueue_blind_transfer(from_ext, to_ext=target)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="引擎队列不可用") from exc
+        return {"ok": True, "from": from_ext, "target": target}
+
+    assert skill_group_id is not None
+    group = db.get(SkillGroup, skill_group_id)
+    if group is None or group.tenant_id != DEFAULT_TENANT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="技能组不存在")
     try:
-        if not is_registered(target):
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"分机未注册: {target}")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="注册状态不可用") from exc
-    try:
-        enqueue_blind_transfer(from_ext, target)
+        enqueue_blind_transfer(from_ext, skill_group_id=skill_group_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="引擎队列不可用") from exc
-    return {"ok": True, "from": from_ext, "target": target}
+    return {"ok": True, "from": from_ext, "skill_group_id": skill_group_id}
 
 
 @router.post("/calls/{call_id}/hangup")

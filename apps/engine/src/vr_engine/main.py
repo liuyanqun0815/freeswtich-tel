@@ -345,21 +345,45 @@ def apply_pending_release(
     return row.status
 
 
-def _commands_for_blind_transfer(ctx: EngineCtx, from_ext: str, to_ext: str) -> list[FsCommand]:
-    """Resolve the agent leg UUID then blind-transfer that leg to ``to_ext``."""
+def _resolve_blind_transfer_leg(ctx: EngineCtx, from_ext: str) -> str | None:
     if ctx.transport is None:
-        logger.warning("blind transfer skipped: no ESL transport from=%s to=%s", from_ext, to_ext)
-        return []
+        logger.warning("blind transfer skipped: no ESL transport from=%s", from_ext)
+        return None
     try:
         body = esl_api(ctx.transport, "show channels as json")
     except Exception:
         logger.exception("blind transfer show channels failed from=%s", from_ext)
-        return []
+        return None
     uuid = pick_extension_leg_uuid(body, from_ext)
     if not uuid:
-        logger.warning("blind transfer no active leg from=%s to=%s", from_ext, to_ext)
+        logger.warning("blind transfer no active leg from=%s", from_ext)
+    return uuid
+
+
+def _commands_for_blind_transfer(
+    ctx: EngineCtx,
+    from_ext: str,
+    *,
+    to_ext: str = "",
+    skill_group_id: Any = None,
+) -> list[FsCommand]:
+    """Resolve the agent leg UUID then blind-transfer to an extension or skill-group member."""
+    uuid = _resolve_blind_transfer_leg(ctx, from_ext)
+    if not uuid:
         return []
-    return [_extension_transfer(uuid, to_ext)]
+    target = (to_ext or "").strip()
+    if target:
+        return [_extension_transfer(uuid, target)]
+    members = [m for m in _skill_group_members(ctx, skill_group_id) if m != from_ext]
+    chosen = pick_bridge_extension("", members, registered=is_registered)
+    if chosen is None:
+        logger.warning(
+            "blind transfer skill group has no online member from=%s skill_group_id=%s",
+            from_ext,
+            skill_group_id,
+        )
+        return []
+    return [_extension_transfer(uuid, chosen)]
 
 
 def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:
@@ -374,8 +398,13 @@ def drain_flush_commands(ctx: EngineCtx) -> list[FsCommand]:
         if job_type == "blind_transfer":
             from_ext = str(job.get("from_ext") or "").strip()
             to_ext = str(job.get("to_ext") or "").strip()
-            if from_ext and to_ext:
-                cmds.extend(_commands_for_blind_transfer(ctx, from_ext, to_ext))
+            skill_group_id = job.get("skill_group_id")
+            if from_ext and (to_ext or skill_group_id is not None):
+                cmds.extend(
+                    _commands_for_blind_transfer(
+                        ctx, from_ext, to_ext=to_ext, skill_group_id=skill_group_id
+                    )
+                )
             continue
         command = job.get("cmd")
         if isinstance(command, str) and command:

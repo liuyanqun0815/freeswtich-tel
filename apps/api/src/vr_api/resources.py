@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from vr_api.auth import get_db, require_admin
+from vr_api.auth import get_db, require_admin, require_password_changed
 from vr_common.db import DEFAULT_TENANT
 from vr_common.models import (
     AiScene,
@@ -574,7 +574,7 @@ def _skill_group_out(row: SkillGroup) -> dict[str, Any]:
 @router.get("/skill-groups")
 def list_skill_groups(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)],
+    _: Annotated[User, Depends(require_password_changed)],
 ) -> dict:
     rows = db.scalars(
         select(SkillGroup).where(SkillGroup.tenant_id == DEFAULT_TENANT)
@@ -840,6 +840,11 @@ def _merge_llm_key(llm: dict[str, Any], previous: dict[str, Any]) -> dict[str, A
 def _apply_scene(row: AiScene, body: AiSceneIn) -> None:
     if body.fallback not in _ALLOWED_FALLBACKS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="fallback must be transfer or hangup")
+    if body.fallback == "transfer" and body.transfer_skill_group_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="失败降级为转人工时必须选择转人工技能组",
+        )
     configs = (body.asr, body.tts, body.llm)
     speech_configs = (body.asr, body.tts)
     if any(field in config for config in speech_configs for field in _PLAIN_SECRET_FIELDS):

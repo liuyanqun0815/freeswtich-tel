@@ -67,10 +67,18 @@ def enqueue_command(cmd: str) -> None:
     get_job_queue().push(json.dumps({"cmd": cmd}))
 
 
-def enqueue_blind_transfer(from_ext: str, to_ext: str) -> None:
-    get_job_queue().push(
-        json.dumps({"type": "blind_transfer", "from_ext": from_ext, "to_ext": to_ext}, ensure_ascii=False)
-    )
+def enqueue_blind_transfer(
+    from_ext: str,
+    *,
+    to_ext: str | None = None,
+    skill_group_id: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {"type": "blind_transfer", "from_ext": from_ext}
+    if to_ext:
+        payload["to_ext"] = to_ext
+    if skill_group_id is not None:
+        payload["skill_group_id"] = skill_group_id
+    get_job_queue().push(json.dumps(payload, ensure_ascii=False))
 
 
 def enqueue_directory_flush(ext: str) -> None:
