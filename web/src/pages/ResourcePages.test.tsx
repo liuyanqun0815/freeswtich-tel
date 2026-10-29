@@ -201,3 +201,61 @@ test("ai scenes form shows tencent asr fields and keeps the vendor on save", asy
     vi.unstubAllGlobals();
   }
 });
+
+test("ai scenes tts vendor dropdown switches fields and saves tencent body", async () => {
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      init?.method === "POST"
+        ? {
+            id: 9,
+            name: "腾讯合成",
+            opening: "",
+            fallback: "hangup",
+            ws_url: null,
+            system_prompt: "hi",
+            transfer_skill_group_id: null,
+            asr: { vendor: "tencent", engine_model_type: "8k_zh" },
+            tts: { vendor: "tencent", voice_id: "v-female-R2s4N9qJ", model: "flow_02_turbo" },
+            llm: { vendor: "openai", base_url: "https://llm.example/v1", model: "llm-1" },
+          }
+        : { items: [] },
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  sessionStorage.setItem("vr_access_token", "test-token");
+  try {
+    render(<AiScenesPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新增场景" }));
+    expect(await screen.findByText(/VOLC_APP_ID/)).toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByText("火山引擎"));
+    fireEvent.click(await screen.findByText("腾讯云"));
+    expect(await screen.findByText(/TENCENT_TRTC_SDK_APP_ID/)).toBeInTheDocument();
+    expect(screen.queryByText(/VOLC_APP_ID/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "腾讯合成" } });
+    fireEvent.change(screen.getByPlaceholderText("v-female-R2s4N9qJ"), {
+      target: { value: "v-female-R2s4N9qJ" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("https://api.example.com/v1"), {
+      target: { value: "https://llm.example/v1" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("deepseek-chat"), { target: { value: "llm-1" } });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), { target: { value: "sk-test" } });
+    fireEvent.click(screen.getByRole("button", { name: /^(确\s*定|OK)$/ }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(
+        true,
+      ),
+    );
+    const post = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    const body = JSON.parse(String((post?.[1] as RequestInit).body));
+    expect(body.tts).toEqual({ vendor: "tencent", voice_id: "v-female-R2s4N9qJ" });
+    expect(body.tts.voice_type).toBeUndefined();
+  } finally {
+    sessionStorage.removeItem("vr_access_token");
+    vi.unstubAllGlobals();
+  }
+});

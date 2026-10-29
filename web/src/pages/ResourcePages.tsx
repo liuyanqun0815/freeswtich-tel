@@ -1607,7 +1607,9 @@ type ProviderConfig = {
   model?: string;
   engine_model_type?: string;
   voice_type?: string;
+  voice_id?: string;
   resource_id?: string;
+  region?: string;
   api_key?: string;
   api_key_set?: boolean;
 };
@@ -1640,8 +1642,22 @@ function asrBody(config: ProviderConfig = {}): ProviderConfig {
   return { vendor: "tencent", engine_model_type: trimmed(config.engine_model_type) };
 }
 
+const TTS_VENDOR_OPTIONS = [
+  { value: "volcengine", label: "火山引擎" },
+  { value: "tencent", label: "腾讯云" },
+];
+
 function ttsBody(config: ProviderConfig = {}): ProviderConfig {
-  return { vendor: "volcengine", voice_type: trimmed(config.voice_type), resource_id: trimmed(config.resource_id) };
+  const vendor = config.vendor === "tencent" ? "tencent" : "volcengine";
+  if (vendor === "tencent") {
+    return {
+      vendor,
+      voice_id: trimmed(config.voice_id),
+      model: trimmed(config.model),
+      region: trimmed(config.region),
+    };
+  }
+  return { vendor, voice_type: trimmed(config.voice_type), resource_id: trimmed(config.resource_id) };
 }
 
 function llmBody(config: ProviderConfig = {}): ProviderConfig {
@@ -1707,6 +1723,38 @@ function VolcTtsFields() {
       >
         <Input placeholder="volc.megatts.default" />
       </Form.Item>
+    </>
+  );
+}
+
+function TencentTtsFields() {
+  return (
+    <>
+      <Typography.Paragraph type="secondary">
+        使用腾讯云 TRTC 流式语音合成。SecretId/SecretKey 复用 TENCENT_SECRET_ID、TENCENT_SECRET_KEY；SdkAppId
+        写在服务器 .env 的 TENCENT_TRTC_SDK_APP_ID
+      </Typography.Paragraph>
+      <Form.Item name={["tts", "voice_id"]} label="音色 ID" rules={[{ required: true, message: "请填写音色 ID" }]}>
+        <Input placeholder="v-female-R2s4N9qJ" />
+      </Form.Item>
+      <Form.Item name={["tts", "model"]} label="模型" extra="默认 flow_02_turbo；高阶可选 flow_01_ex">
+        <Input placeholder="flow_02_turbo" />
+      </Form.Item>
+      <Form.Item name={["tts", "region"]} label="地域" extra="默认 ap-guangzhou">
+        <Input placeholder="ap-guangzhou" />
+      </Form.Item>
+    </>
+  );
+}
+
+function TtsFields() {
+  const vendor = Form.useWatch(["tts", "vendor"]);
+  return (
+    <>
+      <Form.Item name={["tts", "vendor"]} label="合成厂商" rules={[{ required: true, message: "请选择厂商" }]}>
+        <Select options={TTS_VENDOR_OPTIONS} />
+      </Form.Item>
+      {vendor === "tencent" ? <TencentTtsFields /> : <VolcTtsFields />}
     </>
   );
 }
@@ -1884,7 +1932,7 @@ export function AiScenesPage() {
           <Typography.Title level={5}>语音识别</Typography.Title>
           <TencentAsrFields />
           <Typography.Title level={5}>语音合成</Typography.Title>
-          <VolcTtsFields />
+          <TtsFields />
           <LlmFields keySet={Boolean(editing?.llm?.api_key_set)} />
         </Form>
       </Modal>
