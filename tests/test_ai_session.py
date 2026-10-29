@@ -3,7 +3,14 @@ from collections.abc import Awaitable, Callable
 
 from vr_ai.audio import Endpointer
 from vr_ai.providers.base import ProviderError
-from vr_ai.session import BotSession, SceneConfig, command_for, split_sentences
+from vr_ai.session import (
+    BotSession,
+    SceneConfig,
+    command_for,
+    split_sentences,
+    system_messages,
+    wants_human_agent,
+)
 
 VOICED = b"\x01\x00" * 160
 SILENT = bytes(320)
@@ -118,6 +125,24 @@ def test_split_sentences_keeps_unfinished_tail():
     assert split_sentences("好的。请稍等，") == (["好的。"], "请稍等，")
 
 
+def test_wants_human_agent_matches_common_phrases():
+    assert wants_human_agent("我要转人工")
+    assert wants_human_agent("帮我找人工客服")
+    assert not wants_human_agent("查一下订单")
+
+
+def test_system_messages_always_remind_transfer_tool():
+    alone = system_messages("")
+    assert alone == [
+        {"role": "system", "content": "用户明确要求人工服务时必须调用 transfer_to_agent，不要只口头答应。"}
+    ]
+    merged = system_messages("你是客服")
+    assert merged[0]["content"].startswith("你是客服")
+    assert "transfer_to_agent" in merged[0]["content"]
+    kept = system_messages("用户要转人工时调用工具")
+    assert kept == [{"role": "system", "content": "用户要转人工时调用工具"}]
+
+
 def test_command_for_transfer_carries_skill_group():
     scene = SceneConfig(scene_id="1", transfer_skill_group_id=7)
     assert command_for(scene, "transfer") == ("transfer", {"skill_group_id": 7})
@@ -147,10 +172,10 @@ def test_utterance_is_answered_sentence_by_sentence():
 
     harness = _run(run)
     assert harness.tts.texts == ["好的。", "请稍等"]
-    assert harness.llm.calls[0] == [
-        {"role": "system", "content": "你是客服"},
-        {"role": "user", "content": "查订单"},
-    ]
+    assert harness.llm.calls[0][0]["role"] == "system"
+    assert "你是客服" in harness.llm.calls[0][0]["content"]
+    assert "transfer_to_agent" in harness.llm.calls[0][0]["content"]
+    assert harness.llm.calls[0][-1] == {"role": "user", "content": "查订单"}
     assert len(harness.audio) == 2
     assert harness.commands == []
 
@@ -165,28 +190,46 @@ def test_speaking_over_the_robot_sends_break():
     assert _run(run).commands == [("break", {})]
 
 
-def test_transfer_waits_for_playback_then_hands_over():
+def test_transfer_keyword_skips_llm_and_hands_over():
     async def run():
         harness = Harness(
             SceneConfig(scene_id="1", transfer_skill_group_id=7),
-            asr=FakeAsr("转人工"),
+            asr=FakeAsr("我要转人工"),
+            llm=FakeLlm({"text": "不该走到这里"}),
+        )
+        await harness.say()
+        return harness
+
+    harness = _run(run)
+    assert harness.llm.calls == []
+    assert harness.tts.texts == ["正在为您转接人工。"]
+    assert harness.sleeps == [1.0]
+    assert harness.commands == [("transfer", {"skill_group_id": 7})]
+    assert harness.session.finished
+
+
+def test_llm_tool_transfer_still_works_without_keyword():
+    async def run():
+        harness = Harness(
+            SceneConfig(scene_id="1", transfer_skill_group_id=7),
+            asr=FakeAsr("这个问题你解决不了吧"),
             llm=FakeLlm({"text": "正在为您转接。"}, {"action": "transfer"}),
         )
         await harness.say()
         return harness
 
     harness = _run(run)
-    assert harness.sleeps == [1.0]
+    assert harness.llm.calls
     assert harness.commands == [("transfer", {"skill_group_id": 7})]
     assert harness.session.finished
 
 
-def test_speaking_during_farewell_does_not_cancel_transfer():
+def test_speaking_during_transfer_prompt_does_not_cancel_transfer():
     async def run():
         harness = Harness(
             SceneConfig(scene_id="1", transfer_skill_group_id=7),
             asr=FakeAsr("转人工"),
-            llm=FakeLlm({"text": "正在为您转接。"}, {"action": "transfer"}),
+            llm=FakeLlm({"text": "不该走到这里"}),
         )
         harness.on_sleep = lambda: harness.session.on_audio(VOICED * 10)
         await harness.say()

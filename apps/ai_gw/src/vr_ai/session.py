@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -16,6 +17,9 @@ from vr_ai.scriptbot import opening_text
 logger = logging.getLogger("vr.ai.session")
 
 _SENTENCE_END = "。！？；!?;\n"
+_HUMAN_AGENT_RE = re.compile(r"转人工|转接人工|找人工|人工客服|转客服|转接客服")
+_TRANSFER_HINT = "用户明确要求人工服务时必须调用 transfer_to_agent，不要只口头答应。"
+_TRANSFER_PROMPT = "正在为您转接人工。"
 
 SendAudio = Callable[[bytes], Awaitable[None]]
 SendCommand = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -38,6 +42,21 @@ def command_for(scene: SceneConfig, action: str) -> tuple[str, dict[str, Any]]:
     if action == "transfer":
         return "transfer", {"skill_group_id": scene.transfer_skill_group_id}
     return "hangup", {}
+
+
+def wants_human_agent(text: str) -> bool:
+    """True when the user utterance clearly asks for a human agent."""
+    return bool(_HUMAN_AGENT_RE.search((text or "").strip()))
+
+
+def system_messages(system_prompt: str) -> list[dict[str, str]]:
+    """Build the system turn, always reminding the model to call transfer_to_agent."""
+    prompt = (system_prompt or "").strip()
+    if not prompt:
+        return [{"role": "system", "content": _TRANSFER_HINT}]
+    if "transfer_to_agent" in prompt or "转人工" in prompt:
+        return [{"role": "system", "content": prompt}]
+    return [{"role": "system", "content": f"{prompt}\n{_TRANSFER_HINT}"}]
 
 
 def split_sentences(text: str) -> tuple[list[str], str]:
@@ -75,9 +94,7 @@ class BotSession:
         self._endpointer = endpointer or Endpointer()
         self._clock = clock
         self._sleep = sleep
-        self._history: list[dict[str, str]] = []
-        if scene.system_prompt:
-            self._history.append({"role": "system", "content": scene.system_prompt})
+        self._history: list[dict[str, str]] = list(system_messages(scene.system_prompt))
         self._asr_session: AsrSession | None = None
         self._reply: asyncio.Task[None] | None = None
         self._speaking_until = 0.0
@@ -137,6 +154,13 @@ class BotSession:
             if not text:
                 return
             self._history.append({"role": "user", "content": text})
+            if wants_human_agent(text):
+                try:
+                    await self._speak(_TRANSFER_PROMPT)
+                except ProviderError as exc:
+                    logger.error("transfer prompt failed scene=%s: %s", self._scene.scene_id, exc)
+                await self._finish("transfer")
+                return
             action = await self._reply_to(list(self._history))
             if action:
                 await self._finish(action)

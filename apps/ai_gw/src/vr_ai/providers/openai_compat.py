@@ -16,7 +16,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "transfer_to_agent",
-            "description": "用户要求人工服务，或问题超出你的处理范围时调用",
+            "description": "用户说出转人工、找客服等要求，或问题超出你的处理范围时必须调用，不要只口头答应",
             "parameters": {"type": "object", "properties": {}},
         },
     },
