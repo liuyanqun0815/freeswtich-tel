@@ -40,3 +40,24 @@ def test_gateway_xml_escapes_special_chars():
     assert "u&amp;1" in xml
     assert "p&lt;2&gt;" in xml
     assert 'name="gw1"' in xml
+
+
+def test_sofia_conf_includes_profile_settings_and_wss():
+    """xml_curl replaces whole sofia.conf — must ship <settings>, not only gateways."""
+    xml = gateway_xml([])
+    assert 'name="sofia.conf"' in xml
+    assert '<param name="wss-binding" value=":7443"/>' in xml
+    assert 'profile name="internal"' in xml
+    assert 'profile name="external"' in xml
+    assert "<settings>" in xml
+    assert "<gateways>" in xml
+
+
+def test_sofia_conf_puts_gateways_on_external_profile():
+    xml = gateway_xml(
+        [{"name": "gw1", "profile": "external", "username": "u1", "register": False}]
+    )
+    external = xml.split('profile name="external"', 1)[1].split("</profile>", 1)[0]
+    assert 'gateway name="gw1"' in external
+    internal = xml.split('profile name="internal"', 1)[1].split("</profile>", 1)[0]
+    assert "gateway name=" not in internal

@@ -125,28 +125,91 @@ def acl_xml(cidrs: list[str]) -> str:
     )
 
 
+def _profile_settings_xml(params: list[tuple[str, str]]) -> str:
+    lines = [f'          <param name="{escape(name)}" value="{escape(value)}"/>' for name, value in params]
+    return "        <settings>\n" + "\n".join(lines) + "\n        </settings>"
+
+
+def _gateways_xml(gateways: list[dict]) -> str:
+    blocks: list[str] = []
+    for gateway in gateways:
+        name = escape(str(gateway.get("name", "")))
+        params = "\n".join(_gateway_param_lines(gateway))
+        blocks.append(f'          <gateway name="{name}">\n{params}\n          </gateway>')
+    inner = "\n".join(blocks)
+    return f"        <gateways>\n{inner}\n        </gateways>"
+
+
+# Minimal settings so xml_curl can replace the whole sofia.conf without "No Settings".
+_INTERNAL_SETTINGS = [
+    ("context", "public"),
+    ("dialplan", "XML"),
+    ("sip-ip", "$${local_ip_v4}"),
+    ("rtp-ip", "$${local_ip_v4}"),
+    ("sip-port", "5060"),
+    ("ws-binding", ":5066"),
+    ("wss-binding", ":7443"),
+    ("tls", "true"),
+    ("tls-only", "false"),
+    ("tls-bind-params", "transport=tls"),
+    ("tls-sip-port", "5061"),
+    ("tls-cert-dir", "$${certs_dir}"),
+    ("tls-version", "tlsv1.2"),
+    ("inbound-codec-prefs", "OPUS,PCMU,PCMA"),
+    ("outbound-codec-prefs", "OPUS,PCMU,PCMA"),
+    ("apply-nat-acl", "nat.auto"),
+    ("local-network-acl", "localnet.auto"),
+    ("manage-presence", "false"),
+]
+
+_EXTERNAL_SETTINGS = [
+    ("context", "public"),
+    ("dialplan", "XML"),
+    ("sip-ip", "$${local_ip_v4}"),
+    ("rtp-ip", "$${local_ip_v4}"),
+    ("sip-port", "5080"),
+    ("tls", "false"),
+    ("inbound-codec-prefs", "PCMU,PCMA"),
+    ("outbound-codec-prefs", "PCMU,PCMA"),
+    ("manage-presence", "false"),
+]
+
+
 def gateway_xml(gateways: list[dict]) -> str:
-    by_profile: dict[str, list[dict]] = {}
+    """Build a complete sofia.conf: profile settings + published gateways.
+
+    mod_xml_curl replaces the entire sofia.conf document. Returning only
+    ``<gateways>`` leaves profiles without ``<settings>`` and FreeSWITCH logs
+    ``No Settings``, which takes down WSS (:7443) registration.
+    """
+    by_profile: dict[str, list[dict]] = {"internal": [], "external": []}
     for gateway in gateways:
         profile = str(gateway.get("profile") or "external")
         by_profile.setdefault(profile, []).append(gateway)
-    if not by_profile:
-        by_profile = {"external": []}
 
     profile_blocks: list[str] = []
-    for profile, items in sorted(by_profile.items()):
-        gateway_blocks: list[str] = []
-        for gateway in items:
-            name = escape(str(gateway.get("name", "")))
-            params = "\n".join(_gateway_param_lines(gateway))
-            gateway_blocks.append(
-                f'          <gateway name="{name}">\n{params}\n          </gateway>'
+    for profile in sorted(by_profile):
+        items = by_profile[profile]
+        if profile == "internal":
+            settings = _profile_settings_xml(_INTERNAL_SETTINGS)
+        elif profile == "external":
+            settings = _profile_settings_xml(_EXTERNAL_SETTINGS)
+        else:
+            # Unknown profiles still need a settings node or sofia rejects them.
+            settings = _profile_settings_xml(
+                [
+                    ("context", "public"),
+                    ("dialplan", "XML"),
+                    ("sip-ip", "$${local_ip_v4}"),
+                    ("rtp-ip", "$${local_ip_v4}"),
+                    ("sip-port", "5090"),
+                ]
             )
-        gateways_inner = "\n".join(gateway_blocks) if gateway_blocks else ""
         profile_blocks.append(
-            f'        <profile name="{escape(profile)}">\n'
-            f"          <gateways>\n{gateways_inner}\n          </gateways>\n"
-            "        </profile>"
+            f'      <profile name="{escape(profile)}">\n'
+            f"{settings}\n"
+            f"{_gateways_xml(items)}\n"
+            "      </profile>"
         )
 
     profiles_inner = "\n".join(profile_blocks)
@@ -155,6 +218,10 @@ def gateway_xml(gateways: list[dict]) -> str:
         '<document type="freeswitch/xml">\n'
         '  <section name="configuration">\n'
         '    <configuration name="sofia.conf" description="SIP Endpoint">\n'
+        "      <global_settings>\n"
+        '        <param name="log-level" value="0"/>\n'
+        '        <param name="debug-presence" value="0"/>\n'
+        "      </global_settings>\n"
         "      <profiles>\n"
         f"{profiles_inner}\n"
         "      </profiles>\n"

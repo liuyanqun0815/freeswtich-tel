@@ -270,6 +270,10 @@ def test_sofia_conf_empty_when_no_applied_snapshot(client):
     )
     assert "gw-db-only" not in response.text
     assert "<gateways" in response.text
+    # Full sofia.conf so reloadxml does not wipe WSS with "No Settings".
+    assert 'name="wss-binding" value=":7443"' in response.text
+    assert 'profile name="internal"' in response.text
+    assert "<settings>" in response.text
 
 
 def test_acl_conf_uses_latest_applied_list_without_hiding_gateways(client):
